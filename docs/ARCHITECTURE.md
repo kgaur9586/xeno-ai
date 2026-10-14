@@ -1,0 +1,392 @@
+# XENO — Architecture
+
+This document explains each component of XENO, what it is allowed to know,
+and how the components talk to each other. The most important idea is
+**information hiding**: the component that knows the hidden rule must never
+hand it to the component that is trying to discover it.
+
+---
+
+## 1. The big picture
+
+```
+                 ┌────────────────────────────────────────────┐
+                 │                 EVALUATOR                  │
+                 │  knows the hidden rule; generates unseen   │
+                 │  test cases; scores theories               │
+                 └───────────────▲────────────────────────────┘
+                                 │ ground truth (private)
+                                 │
+┌──────────────┐  safe calls  ┌──┴───────────────┐   private   ┌────────────────┐
+│    AGENT     │ ───────────▶ │ EXPERIMENT TOOLS │ ──────────▶ │  WORLD ENGINE  │
+│ (scripted,   │ ◀─────────── │ validate input,  │ ◀────────── │ holds hidden   │
+│  later LLM)  │  observations│ enforce budget,  │  raw result │ rule, computes │
+└──────┬───────┘   only       │ strip secrets    │             │ outcomes       │
+       │                      └──────┬───────────┘             └────────────────┘
+       │ measurements & theories     │ records
+       │ (restricted language)       ▼
+       │                      ┌──────────────────┐
+       └────────────────────▶ │ OBSERVATION LOG  │
+                              │ (lab notebook)   │
+                              └──────────────────┘
+```
+
+The experiment tools are the trust boundary: everything on the **left**
+(the agent) is untrusted. Everything on the **right** (world engine,
+evaluator) is trusted and private.
+
+---
+
+## 2. Components
+
+### 2.1 World engine (`src/worlds/`)
+
+**What it is:** A simulation of a small universe with a secret rule. For
+example: "an object glows when attributes `a` and `b` are on opposite sides
+of a hidden threshold" (see section 5).
+
+**What it knows:** Everything, including the hidden rule and its private
+configuration (such as the threshold value).
+
+**What it does:**
+- Given experiment inputs, computes the outcome using the hidden rule.
+- In Phase 1 the rule is **fixed** and the world has no randomness: the
+  outcome is a pure function of the inputs, so the same inputs always give
+  the same outcome. The rule does not depend on any seed.
+
+**Who may call it:** Only the experiment tools and the evaluator. The agent
+never receives a reference to the world engine, and the private rule
+configuration never appears in any public output.
+
+### 2.2 Experiment tools (`src/tools/`)
+
+**What it is:** The only door between the agent and the world. Think of it as
+a lab technician: you hand them a request form, they run the experiment, and
+they hand back only the measurement readout.
+
+**What it does:**
+- **Validates inputs** with Zod (a library that checks data has the right
+  shape and ranges). Bad input is rejected with a safe error: a fixed error
+  code and a fixed message, never a stack trace or internal values.
+- **Enforces a budget** (maximum number of experiments), because a real
+  scientist has limited resources and unlimited trials would make discovery
+  trivial.
+- **Returns only allowed fields:** builds a fresh output object with an
+  exact, fixed set of fields. It never forwards the world's internal objects.
+- **Records** every accepted experiment in the observation log.
+
+**Why separate from the world:** If the agent talked to the world directly, a
+single careless field (for example `world.threshold`) could leak the answer.
+A narrow, explicit output format makes leaks easy to test for: we check that
+responses contain exactly the allowed fields, rather than searching the
+output for "secret-looking" numbers. (Searching for a number like `5` would
+not work, because `5` is also a perfectly legal input value.)
+
+### 2.3 Observation log (`src/tools/` in Phase 1, its own module later)
+
+**What it is:** A lab notebook. An ordered list of every experiment: inputs,
+observed outcome, and step number.
+
+**Why it is needed:** The agent reasons from it, the dashboard displays it,
+and later MongoDB stores it. It is also how we audit what the agent actually
+saw.
+
+### 2.4 Expression language (`src/language/`, Phase 3)
+
+**What it is:** A tiny, restricted math language used for two things:
+- **Measurements:** new quantities built from raw attributes, e.g.
+  `m = (a - 5) * (b - 5)`.
+- **Theories:** prediction rules, e.g. "glows when `m < 0`".
+
+**Why not just run JavaScript?** An LLM could write code that reads files,
+calls the network, or simply reads the hidden rule from memory. Instead,
+expressions are JSON trees like this one for `(a - 5) * (b - 5)`:
+
+```json
+{
+  "op": "mul",
+  "left":  { "op": "sub", "left": { "var": "a" }, "right": { "const": 5 } },
+  "right": { "op": "sub", "left": { "var": "b" }, "right": { "const": 5 } }
+}
+```
+
+Zod checks the tree, and our own interpreter walks it. Only whitelisted
+operations exist, so nothing dangerous can be expressed.
+
+### 2.5 Agent (`src/agents/`, Phase 2 scripted, Phase 5 LLM)
+
+**What it is:** The discoverer. It decides which experiments to run, which
+measurements to create, and which theories to propose.
+
+**What it knows:** Only the public world description (attribute names and
+allowed ranges), its budget, and the observations returned by the tools.
+
+**Phases:**
+- Phase 2: simple hand-coded strategies (baselines).
+- Phase 5: an LLM behind a thin provider interface, calling the same tools.
+
+### 2.6 Evaluator (`src/evaluator/`)
+
+**What it is:** The examiner. It has access to the hidden rule so it can
+generate correct answers for cases the agent has never seen.
+
+**What it does:**
+- Generates **held-out test cases** (unseen by the agent) with a **seeded
+  random number generator**. A *seed* is a starting number; the same seed
+  always produces the same sequence of "random" numbers, so the same seed
+  always reproduces the same test cases. The evaluation seed is never given
+  to the agent.
+- In Phase 1, all test cases lie **within the permitted input ranges**.
+- From Phase 4 (once the theory language exists), it also generates
+  **out-of-range** cases to check extrapolation, not just memorization.
+- Scores a theory: accuracy, and later simplicity and transfer.
+
+**Why separate from the tools:** The evaluator's test cases must never pass
+through the agent-facing tools; otherwise the agent could "study the exam".
+The evaluator calls the world engine directly, so evaluating does not use up
+the agent's budget or appear in its observation log.
+
+### 2.7 Later components
+
+| Component       | Phase | Role                                           |
+| --------------- | ----- | ---------------------------------------------- |
+| Backend API     | 8     | HTTP access to sessions, logs, scores          |
+| React dashboard | 9     | Visual view of experiments and theories        |
+| MongoDB storage | 10    | Durable storage behind a storage interface     |
+
+---
+
+## 3. How a discovery session flows
+
+1. A session is created with a world, a seed, and an experiment budget.
+2. The agent receives the **public description**: attribute names, ranges,
+   outcome type. No rule.
+3. Loop until the budget runs out:
+   1. Agent asks the tools to run an experiment with chosen inputs.
+   2. Tools validate the request and check the budget.
+   3. Tools ask the world engine for the outcome.
+   4. Tools build a clean public observation, log it, and return it.
+4. Agent proposes measurements and a theory (restricted language).
+5. Evaluator scores the theory on held-out cases (within the permitted
+   ranges in Phase 1; out-of-range cases are added in Phase 4).
+6. (Phase 7) The theory is tested in an altered world to measure transfer.
+
+---
+
+## 4. Leak prevention checklist
+
+The hidden rule could leak through any of these channels. Each one is
+guarded by a structural check, not by searching output text for particular
+numbers.
+
+- Tool return values: validated against strict output schemas with an exact
+  set of allowed fields.
+- Error messages: a fixed error code plus a fixed message per code; never a
+  stack trace, internal value, or dump of an object.
+- The public world description: must equal the documented description
+  exactly, with no private rule configuration.
+- Logs or transcripts visible to the agent: contain only public
+  observations.
+- Evaluation seed and test cases: never passed through the agent-facing
+  tools.
+- Object references: the agent gets plain data copies, never live objects,
+  so changing returned data cannot change internal state.
+- Design documents and source code (including this file) are never placed in
+  the agent's context.
+
+---
+
+## 5. First world: "Glow World"
+
+### 5.1 The world
+
+Each experiment creates one object with three attributes the agent chooses:
+
+| Attribute | Allowed range | Meaning to the agent |
+| --------- | ------------- | -------------------- |
+| `a`       | 0 to 10       | unknown property     |
+| `b`       | 0 to 10       | unknown property     |
+| `c`       | 0 to 10       | unknown property     |
+
+Both ends of each range are allowed (0 and 10 are valid inputs). The outcome
+is one boolean: `glows`.
+
+**Hidden rule (private):** the object glows exactly when `a` and `b` are on
+**opposite sides of 5**. If either `a` or `b` equals exactly 5, the object
+does not glow. Equivalently:
+
+```
+glows = ((a - 5) * (b - 5)) < 0
+```
+
+`a` and `b` are the relevant attributes. `c` is a **distractor**: it has no
+effect. The formula and the threshold value 5 are private world
+configuration and are never given to the agent.
+
+**Useful derived measurement (the target discovery):**
+
+```
+m = (a - 5) * (b - 5)
+```
+
+The eventual theory, expressed in the restricted language (Phases 3 and 4),
+is "glows when `m < 0`".
+
+**Why this design:**
+- **No single attribute predicts the outcome.** With `a` and `b` drawn
+  uniformly from 0 to 10, knowing only `a` (or only `b`) leaves a 50% chance
+  either way, because the other attribute is equally likely to be on either
+  side of 5. The agent must combine `a` and `b` into a new measurement,
+  which directly exercises project goal 3.
+- **The natural glow rate is about 50%**, so the lazy theories "always
+  glows" and "never glows" are no better than a coin flip.
+- Neutral names (`a`, `b`, `c` instead of "mass", "volume") stop an LLM from
+  guessing via memorized physics rather than experimenting.
+- The distractor tests whether theories include irrelevant factors.
+- It is deterministic (no noise) so tests are exact. Noise comes in Phase 6.
+- Transfer variants are easy later (Phase 7): move the threshold from 5 to
+  another value, rescale `a`, rename attributes, or use different thresholds
+  for `a` and `b`.
+
+**Why the first design was replaced:** the earlier rule `glows = (a / b) > 2.5`
+on ranges 0.1 to 10 only glows when `b` is below 4, and glows only about 19%
+of the time. So `b` alone was highly predictive ("small `b` might glow, large
+`b` never glows"), and "never glows" scored about 81%. That contradicted the
+claim that individual attributes do not predict the outcome well.
+
+### 5.2 Public description (what the agent sees)
+
+```json
+{
+  "worldId": "glow-world",
+  "attributes": {
+    "a": { "min": 0, "max": 10 },
+    "b": { "min": 0, "max": 10 },
+    "c": { "min": 0, "max": 10 }
+  },
+  "outcome": { "glows": "boolean" },
+  "experimentBudget": 30
+}
+```
+
+This object must match exactly. It contains no rule, no formula, and no
+threshold.
+
+### 5.3 Experiment tool contract
+
+Input (validated by a strict Zod schema: all three fields required, finite
+numbers only, within range, extra fields rejected):
+
+```json
+{ "a": 8, "b": 2, "c": 1 }
+```
+
+Success output (exactly these fields, at every level):
+
+```json
+{
+  "ok": true,
+  "observation": {
+    "step": 1,
+    "inputs": { "a": 8, "b": 2, "c": 1 },
+    "outcome": { "glows": true },
+    "remainingBudget": 29
+  }
+}
+```
+
+Error output (exactly these fields; `code` is one of a fixed set, and each
+code has one fixed `message`):
+
+```json
+{ "ok": false, "error": { "code": "INVALID_INPUT", "message": "Experiment inputs are invalid." } }
+```
+
+```json
+{ "ok": false, "error": { "code": "BUDGET_EXHAUSTED", "message": "No experiments remain in the budget." } }
+```
+
+Rejected requests do not use up budget and are not added to the
+observation log.
+
+### 5.4 Evaluator contract (Phase 1 version)
+
+The evaluator takes a **seed** and a **case count**, generates held-out
+cases, and returns a predictor's accuracy on them.
+
+- **Within range only:** every generated `a`, `b`, `c` lies in 0 to 10.
+  Out-of-range evaluation is deferred to Phase 4.
+- **Reproducible:** the same seed and count always produce the identical
+  list of cases (same inputs, same order, same correct answers).
+- **Balanced:** exactly half the cases glow and half do not. The natural
+  rate is already about 50%, but forcing an exact split makes constant
+  predictors ("always glows", "never glows") score exactly 50%, which keeps
+  the tests precise.
+- **Labels come from the world engine**, called directly, never through the
+  experiment tools.
+
+In Phase 1, predictors are small TypeScript functions written by us inside
+tests (trusted code). In Phase 4 they are replaced by theories written in the
+restricted language, so LLM output is never executed as code.
+
+### 5.5 Acceptance tests for Phase 1
+
+| #  | Test                     | What it proves                                                                                     |
+| -- | ------------------------ | -------------------------------------------------------------------------------------------------- |
+| 1  | Reproducibility          | The same seed and count produce an identical evaluation case list. The world gives the same outcome for the same inputs every time. (The rule is fixed; seeds only control which cases are generated.) |
+| 2  | Rule correctness         | `(a=8, b=2)` and `(a=2, b=8)` glow; `(8, 8)` and `(2, 2)` do not; `(0, 10)` glows; changing `c` (0, 5, 10) never changes the outcome. |
+| 3  | Boundary                 | `(5, 2)`, `(2, 5)`, `(5, 8)`, and `(5, 5)` do **not** glow: exactly 5 counts as neither side.       |
+| 4  | Input validation         | Accepts 0 and 10. Rejects values below 0 or above 10, missing fields, extra fields, strings, `null`, `NaN`, and `Infinity`. |
+| 5  | Budget                   | `remainingBudget` counts down from 29 to 0; the 31st experiment returns `BUDGET_EXHAUSTED`.        |
+| 6  | Exact response fields    | Success responses, observations, inputs, outcomes, and the public description each contain exactly the documented fields (checked with strict schemas and exact key comparison). None contains private rule configuration. |
+| 7  | Safe errors              | Error responses contain exactly `ok` and `error`, which contains exactly `code` and `message`; the code is from the fixed set, and the message is that code's fixed text. |
+| 8  | No shared state          | Changing a returned observation, the public description, or a copy of the log does not change the stored log, the remaining budget, or later outcomes. |
+| 9  | Observation log          | Every accepted experiment is logged in order with correct step numbers; rejected requests are not logged and do not use budget. |
+| 10 | Evaluation separation    | Running the evaluator does not change the observation log or the budget. All evaluation inputs lie within 0 to 10. |
+| 11 | Evaluator discriminates  | On a balanced set: the correct predictor (`(a - 5) * (b - 5) < 0`) scores 100%; "always glows" and "never glows" score exactly 50%; single-attribute predictors "`a > 5`", "`b > 5`", and "`c > 5`" score near 50%; the partial predictor "`a > 5` and `b < 5`" scores near 75%. |
+
+Phase 1 is complete only when all eleven tests pass with `npm test`.
+
+---
+
+## 6. Directory structure
+
+All code lives in one package at the project root. Phase 1 creates only
+these files:
+
+```
+xeno-ai/
+  docs/
+    PROJECT_PLAN.md
+    ARCHITECTURE.md
+  src/
+    worlds/
+      glow-world.ts         world engine: the ONLY place the hidden rule lives
+    tools/
+      schemas.ts            strict Zod schemas for tool inputs and outputs
+      experiment-tools.ts   agent-facing door: validate, budget, log, copy out
+    evaluator/
+      random.ts             seeded random number generator
+      evaluator.ts          generates held-out cases, scores predictors
+  tests/
+    glow-world.test.ts
+    experiment-tools.test.ts
+    evaluator.test.ts
+  package.json              project info and the `npm test` command
+  tsconfig.json             TypeScript compiler settings
+```
+
+The seeded random number generator sits in `src/evaluator/` because the
+evaluator is its only user in Phase 1. If the Phase 2 random baseline also
+needs it, it moves to a shared folder at that point.
+
+Phase 1 dependencies: `zod` (runtime) plus `typescript` and `vitest`
+(development only). Nothing else.
+
+Later phases add folders as they are needed, not before:
+
+| Folder          | Phase | Contents                                |
+| --------------- | ----- | --------------------------------------- |
+| `src/agents/`   | 2, 5  | Scripted baselines, then the LLM agent  |
+| `src/language/` | 3, 4  | Restricted measurement/theory language  |
+| API and web app | 8, 9  | Backend server and React dashboard      |
