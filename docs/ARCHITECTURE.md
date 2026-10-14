@@ -91,7 +91,7 @@ observed outcome, and step number.
 and later MongoDB stores it. It is also how we audit what the agent actually
 saw.
 
-### 2.4 Expression language (`src/language/`, Phase 3)
+### 2.4 Expression and theory language (`src/language/`, Phases 3 and 4)
 
 **What it is:** A tiny, restricted math language used for two things:
 - **Measurements:** new quantities built from raw attributes, e.g.
@@ -152,6 +152,17 @@ Messages never repeat the input. The language imports only Zod and its own
 files; it never touches the world engine, the evaluator, the file system,
 or the network.
 
+**Theory format (Phase 4):** A theory is a strict object with exactly three
+fields: `measurement` (a validated expression), `operator` (`lt`, `lte`,
+`gt`, or `gte`), and a finite numeric `threshold`. For example, a theory can
+state that its measurement predicts `true` when it is less than zero. Theory
+validation calls the existing bounded expression validator, and evaluation
+calls the existing safe interpreter; there is no second expression engine.
+
+Theory complexity is reported as the measurement AST's node count and depth.
+It remains separate from in-range and out-of-range accuracy. XENO does not
+combine them into an arbitrary weighted score.
+
 ### 2.5 Agent (`src/agents/`, Phase 2 scripted, Phase 5 LLM)
 
 **What it is:** The discoverer. It decides which experiments to run, which
@@ -180,7 +191,21 @@ generate correct answers for cases the agent has never seen.
 - In Phase 1, all test cases lie **within the permitted input ranges**.
 - From Phase 4 (once the theory language exists), it also generates
   **out-of-range** cases to check extrapolation, not just memorization.
-- Scores a theory: accuracy, and later simplicity and transfer.
+- Scores a theory: in-range and out-of-range accuracy plus deterministic
+  complexity; transfer is added later.
+
+**Phase 4 dataset construction:**
+- The in-range set draws `a`, `b`, and `c` from `[0, 10]`. Labels come from
+  the world engine. Draws are accepted until each outcome class contains
+  exactly half of the requested even case count.
+- The out-of-range set always draws `a` outside the public range: either
+  below `0` or above `10`. It draws `b` from an extended interval one public
+  range-width beyond each side and keeps distractor `c` in `[0, 10]`.
+  Labels again come only from the world engine, and class-limited acceptance
+  produces exactly equal positive and negative counts.
+- The two sets use independent seeds. The evaluator returns only aggregate
+  counts, accuracy, fixed evaluation-error categories, and complexity. It
+  does not return seeds, cases, labels, or the hidden rule.
 
 **Why separate from the tools:** The evaluator's test cases must never pass
 through the agent-facing tools; otherwise the agent could "study the exam".
@@ -392,7 +417,7 @@ Phase 1 is complete only when all eleven tests pass with `npm test`.
 
 ## 6. Directory structure
 
-All code lives in one package at the project root. Phases 1 to 3 create
+All code lives in one package at the project root. Phases 1 to 4 create
 only these files:
 
 ```
@@ -407,7 +432,8 @@ xeno-ai/
       schemas.ts            strict Zod schemas for tool inputs and outputs
       experiment-tools.ts   agent-facing door: validate, budget, log, copy out
     evaluator/
-      evaluator.ts          generates held-out cases, scores predictors
+      evaluator.ts          generates private datasets and scores theories
+      theory-registry.ts    defensive in-memory theory and metrics registry
     shared/
       random.ts             seeded random number generator (Phase 2 move)
     agents/                 (Phase 2)
@@ -418,10 +444,11 @@ xeno-ai/
       baseline-comparison.ts  fixed-budget, fixed-seed comparison table
     cli/
       baselines.ts          entry point for `npm run baselines`
-    language/               (Phase 3)
+    language/               (Phases 3 and 4)
       errors.ts             fixed error codes and messages
       expression.ts         node types, allowed names, limits, Zod schema
       preflight.ts          bounded non-recursive safety pass and copy
+      theory.ts             strict theory validation and AST complexity
       validate.ts           validateExpression, parseExpressionJson
       interpreter.ts        evaluateExpression: the safe calculator
   tests/
@@ -438,6 +465,9 @@ xeno-ai/
     baseline-runner.test.ts
     experimenter-isolation.test.ts
     baseline-comparison.test.ts
+    theory-validation.test.ts
+    theory-evaluator.test.ts
+    theory-registry.test.ts
   package.json              project info and the `npm test` command
   tsconfig.json             TypeScript settings (type check of src + tests)
   tsconfig.build.json       production build settings (src only)
@@ -455,13 +485,12 @@ Dependencies: `zod` (runtime) plus `typescript` and `vitest` (development
 only). Phase 2 adds `@types/node` (development only, type definitions with
 no runtime code) so tests can read source files for the import check.
 
-Later phases add folders as they are needed, not before:
+Later phases add these contents as they are needed, not before:
 
-| Folder          | Phase | Contents                                |
-| --------------- | ----- | --------------------------------------- |
-| `src/agents/`   | 5     | The LLM agent, next to the baselines    |
-| `src/language/` | 4     | Theory language, next to measurements   |
-| API and web app | 8, 9  | Backend server and React dashboard      |
+| Location        | Phase | Contents                             |
+| --------------- | ----- | ------------------------------------ |
+| `src/agents/`   | 5     | The LLM agent, next to the baselines |
+| API and web app | 8, 9  | Backend server and React dashboard   |
 
 ---
 

@@ -360,7 +360,14 @@ describe("Language module isolation", () => {
   const files = readdirSync(languageDirectory).filter((name) => name.endsWith(".ts"));
 
   it("contains the expected files", () => {
-    expect(files.sort()).toEqual(["errors.ts", "expression.ts", "interpreter.ts", "preflight.ts", "validate.ts"]);
+    expect(files.sort()).toEqual([
+      "errors.ts",
+      "expression.ts",
+      "interpreter.ts",
+      "preflight.ts",
+      "theory.ts",
+      "validate.ts",
+    ]);
   });
 
   it.each(files)("%s imports only zod and other language files", (file) => {

@@ -162,13 +162,15 @@ measurements, and score them properly.
   validated by Zod.
 - Evaluator scoring: accuracy on held-out cases, accuracy on
   **out-of-range** cases (extrapolation, introduced in this phase), and a
-  simplicity score.
+  deterministic complexity report kept separate from accuracy.
 - A theory registry that records each theory and its scores.
 
 **Exit criteria**
 - The true theory scores near 100% in- and out-of-range.
 - Theories that rely on a distractor attribute score near chance.
-- Theories that only memorize seen data fail on out-of-range cases.
+- A specifically tested range-overfit theory fits selected in-range
+  observations but fails on the out-of-range cases; this is not a claim that
+  every possible memorizing theory must fail every extrapolation dataset.
 
 ---
 
