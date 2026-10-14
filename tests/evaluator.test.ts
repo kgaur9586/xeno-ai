@@ -5,7 +5,7 @@ import {
   scorePredictor,
   type Predictor,
 } from "../src/evaluator/evaluator.js";
-import { createSeededRandom } from "../src/evaluator/random.js";
+import { createSeededRandom } from "../src/shared/random.js";
 import { createExperimentTools } from "../src/tools/experiment-tools.js";
 
 const SEEDS = [1, 42, 2026];

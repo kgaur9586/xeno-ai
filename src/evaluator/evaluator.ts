@@ -11,7 +11,7 @@ import {
   computeGlowOutcome,
   type GlowInputs,
 } from "../worlds/glow-world.js";
-import { createSeededRandom, type RandomSource } from "./random.js";
+import { createSeededRandom, type RandomSource } from "../shared/random.js";
 
 export interface EvaluationCase {
   inputs: GlowInputs;

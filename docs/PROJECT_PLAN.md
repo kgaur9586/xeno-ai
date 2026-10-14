@@ -94,14 +94,25 @@ a correct theory from a wrong one.
 whether the LLM actually helps.
 
 **Deliverables**
-- A **random** experimenter (picks random inputs).
-- A **simple search** experimenter (hand-coded strategy, e.g. vary one
-  attribute at a time).
-- A runner that executes an experimenter for N experiments and reports results.
+- A common experimenter interface that receives only the public world
+  description and the experiment tools (`src/agents/experimenter.ts`).
+- A **random** experimenter (seeded random inputs within the public ranges).
+- A **systematic** experimenter: a factorial grid of minimum, midpoint, and
+  maximum for each attribute, derived from the public ranges (27
+  experiments; it stops when the grid is complete).
+- A runner that executes an experimenter under a configurable budget and
+  reports descriptive metrics: experiment and request counts, rejected
+  requests, unique and repeated inputs, outcome counts, and per-attribute
+  value distributions.
+- The seeded random number generator moves to `src/shared/random.ts`.
 
 **Exit criteria**
-- Both baselines run end-to-end through the experiment tools only.
+- Both baselines run end-to-end through the experiment tools only, and a
+  test confirms they never import the world engine or the evaluator.
 - Their results are reproducible with a fixed seed.
+- Runner metrics are verified against hand-built observations.
+- Metrics are descriptive only. Neither baseline is called "better at
+  discovery" until Phase 4 scores actual theories.
 
 ---
 

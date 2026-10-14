@@ -120,6 +120,8 @@ measurements to create, and which theories to propose.
 
 **What it knows:** Only the public world description (attribute names and
 allowed ranges), its budget, and the observations returned by the tools.
+Every experimenter implements the same interface: it receives
+`{ description, tools }` and nothing else.
 
 **Phases:**
 - Phase 2: simple hand-coded strategies (baselines).
@@ -351,8 +353,8 @@ Phase 1 is complete only when all eleven tests pass with `npm test`.
 
 ## 6. Directory structure
 
-All code lives in one package at the project root. Phase 1 creates only
-these files:
+All code lives in one package at the project root. Phases 1 and 2 create
+only these files:
 
 ```
 xeno-ai/
@@ -366,27 +368,43 @@ xeno-ai/
       schemas.ts            strict Zod schemas for tool inputs and outputs
       experiment-tools.ts   agent-facing door: validate, budget, log, copy out
     evaluator/
-      random.ts             seeded random number generator
       evaluator.ts          generates held-out cases, scores predictors
+    shared/
+      random.ts             seeded random number generator (Phase 2 move)
+    agents/                 (Phase 2)
+      experimenter.ts       common experimenter interface
+      random-explorer.ts    seeded random baseline
+      systematic-explorer.ts  min/mid/max factorial grid baseline
+      baseline-runner.ts    runs an experimenter, reports exploration metrics
   tests/
     glow-world.test.ts
     experiment-tools.test.ts
     evaluator.test.ts
+    random-explorer.test.ts
+    systematic-explorer.test.ts
+    baseline-runner.test.ts
+    experimenter-isolation.test.ts
   package.json              project info and the `npm test` command
-  tsconfig.json             TypeScript compiler settings
+  tsconfig.json             TypeScript settings (type check of src + tests)
+  tsconfig.build.json       production build settings (src only)
 ```
 
-The seeded random number generator sits in `src/evaluator/` because the
-evaluator is its only user in Phase 1. If the Phase 2 random baseline also
-needs it, it moves to a shared folder at that point.
+The seeded random number generator moved from `src/evaluator/` to
+`src/shared/` in Phase 2, when the random baseline became its second user.
+Its code did not change.
 
-Phase 1 dependencies: `zod` (runtime) plus `typescript` and `vitest`
-(development only). Nothing else.
+Experimenter files may import only types from `src/tools/` and the shared
+random number generator. They never import `src/worlds/` or
+`src/evaluator/`; a test reads their source to enforce this.
+
+Dependencies: `zod` (runtime) plus `typescript` and `vitest` (development
+only). Phase 2 adds `@types/node` (development only, type definitions with
+no runtime code) so tests can read source files for the import check.
 
 Later phases add folders as they are needed, not before:
 
 | Folder          | Phase | Contents                                |
 | --------------- | ----- | --------------------------------------- |
-| `src/agents/`   | 2, 5  | Scripted baselines, then the LLM agent  |
+| `src/agents/`   | 5     | The LLM agent, next to the baselines    |
 | `src/language/` | 3, 4  | Restricted measurement/theory language  |
 | API and web app | 8, 9  | Backend server and React dashboard      |
