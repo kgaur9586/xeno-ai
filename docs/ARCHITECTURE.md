@@ -376,6 +376,9 @@ xeno-ai/
       random-explorer.ts    seeded random baseline
       systematic-explorer.ts  min/mid/max factorial grid baseline
       baseline-runner.ts    runs an experimenter, reports exploration metrics
+      baseline-comparison.ts  fixed-budget, fixed-seed comparison table
+    cli/
+      baselines.ts          entry point for `npm run baselines`
   tests/
     glow-world.test.ts
     experiment-tools.test.ts
@@ -384,6 +387,7 @@ xeno-ai/
     systematic-explorer.test.ts
     baseline-runner.test.ts
     experimenter-isolation.test.ts
+    baseline-comparison.test.ts
   package.json              project info and the `npm test` command
   tsconfig.json             TypeScript settings (type check of src + tests)
   tsconfig.build.json       production build settings (src only)
@@ -408,3 +412,39 @@ Later phases add folders as they are needed, not before:
 | `src/agents/`   | 5     | The LLM agent, next to the baselines    |
 | `src/language/` | 3, 4  | Restricted measurement/theory language  |
 | API and web app | 8, 9  | Backend server and React dashboard      |
+
+---
+
+## 7. Benchmark limitations
+
+`npm run baselines` builds the project and prints a comparison of the two
+scripted experimenters. Both use a budget of **27** experiments (the size of
+the systematic grid), and the random explorer uses the fixed seed **42**, so
+the output is identical on every run.
+
+Keep these limitations in mind when reading any baseline comparison:
+
+- **The grid uses minimum, midpoint, and maximum.** For each attribute, the
+  systematic explorer tries only the public minimum, the midpoint, and the
+  public maximum (0, 5, and 10 in Glow World).
+- **In Glow World the midpoint coincides with the hidden threshold.** The
+  midpoint of the public range 0 to 10 is 5, which is also the private
+  threshold. The explorer does not know this; it is a coincidence of the
+  world's design. But it means every grid experiment with `a = 5` or
+  `b = 5` lands exactly on the boundary and can never glow, so only 6 of the
+  27 grid experiments glow.
+- **This distorts comparisons.** The coincidence could make the grid look
+  better (it probes the boundary exactly) or worse (few glowing examples, and
+  no values between the levels) than it would in a world whose threshold is
+  elsewhere. Results from Glow World should not be generalized to other
+  worlds without re-running the comparison there.
+- **Compare strategies at equal budgets.** A strategy given more experiments
+  will naturally show more coverage. All future comparisons must give every
+  strategy the same experiment budget.
+- **Outcome counts and coverage are not discovery.** More glowing outcomes
+  or wider coverage does not mean a strategy found the rule. Discovery
+  ability is measured only by scoring the theories each strategy leads to
+  with the evaluator on held-out cases (Phase 4 onward).
+
+The command's output does not print the threshold itself; it points to this
+section instead.

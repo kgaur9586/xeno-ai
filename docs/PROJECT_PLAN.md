@@ -105,6 +105,15 @@ whether the LLM actually helps.
   requests, unique and repeated inputs, outcome counts, and per-attribute
   value distributions.
 - The seeded random number generator moves to `src/shared/random.ts`.
+- `npm run baselines`: a reproducible comparison table (both strategies at
+  a budget of 27, random seed 42), labeled as exploration metrics only.
+
+**Known limitations** (details in `ARCHITECTURE.md` section 7)
+- The grid's midpoint (5) coincides with Glow World's hidden threshold, so
+  grid results in this world are not representative of other worlds.
+- Comparisons must always use equal experiment budgets.
+- Glowing counts and input coverage are not discovery; discovery is measured
+  only by the theory evaluator (Phase 4).
 
 **Exit criteria**
 - Both baselines run end-to-end through the experiment tools only, and a
