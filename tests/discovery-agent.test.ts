@@ -1,6 +1,12 @@
 import { readFileSync } from "node:fs";
+import { ApiError } from "@google/genai";
 import { describe, expect, it } from "vitest";
-import { runDiscoveryAgent } from "../src/agents/discovery-agent.js";
+import {
+  PROVIDER_RETRY_BASE_MS,
+  PROVIDER_RETRY_MAX_MS,
+  providerRetryDelayMs,
+  runDiscoveryAgent,
+} from "../src/agents/discovery-agent.js";
 import { buildDiscoveryPrompt } from "../src/agents/discovery-prompt.js";
 import {
   DISCOVERY_TOOL_DECLARATIONS,
@@ -11,6 +17,7 @@ import {
 import { DISCOVERY_TOOL_ERROR } from "../src/agents/discovery-tools.js";
 import { LANGUAGE_ERROR_MESSAGES } from "../src/language/errors.js";
 import { THEORY_ERROR } from "../src/language/theory.js";
+import { createGeminiProvider, type GeminiGenerateResponse } from "../src/llm/gemini-provider.js";
 import { ProviderRequestError, PROVIDER_ERROR_MESSAGES } from "../src/llm/provider.js";
 import { createExperimentTools } from "../src/tools/experiment-tools.js";
 import { ExperimentResultSchema } from "../src/tools/schemas.js";
@@ -259,6 +266,7 @@ describe("Discovery agent loop", () => {
       maxModelTurns: 4,
       timeoutMs: 30,
       maxRetries: 1,
+      sleep: async () => undefined,
     });
 
     expect(result.status).toBe("timeout");
@@ -289,6 +297,7 @@ describe("Discovery agent loop", () => {
       timeoutMs: 1_000,
       maxRetries: 1,
       secrets: [secret],
+      sleep: async () => undefined,
     });
 
     expect(failed.status).toBe("provider_failure");
@@ -309,6 +318,7 @@ describe("Discovery agent loop", () => {
       timeoutMs: 1_000,
       maxRetries: 2,
       secrets: [secret],
+      sleep: async () => undefined,
     });
     expect(success.status).toBe("turn_limit");
     expect(recovered.callCount).toBe(3);
@@ -434,4 +444,232 @@ describe("Discovery agent loop", () => {
     ).rejects.toThrow(/Provider retries/);
     expect(script.callCount).toBe(0);
   });
+
+  it("backs off with a bounded delay before retrying a transient provider failure", () => {
+    expect(providerRetryDelayMs(0, 0)).toBe(PROVIDER_RETRY_BASE_MS / 2);
+    expect(providerRetryDelayMs(0, 1)).toBe(PROVIDER_RETRY_BASE_MS);
+    expect(providerRetryDelayMs(1, 1)).toBe(PROVIDER_RETRY_BASE_MS * 2);
+    expect(providerRetryDelayMs(2, 1)).toBe(PROVIDER_RETRY_BASE_MS * 4);
+    expect(providerRetryDelayMs(30, 1)).toBe(PROVIDER_RETRY_MAX_MS);
+    expect(providerRetryDelayMs(0, Number.NaN)).toBe(PROVIDER_RETRY_BASE_MS / 2);
+    expect(providerRetryDelayMs(0, 0)).toBeGreaterThan(0);
+  });
+
+  it("does not retry a permanent HTTP 400 and keeps the diagnostic out of the model context", async () => {
+    const secret = "AIzaSyPermanentFailureKey";
+    const seen: string[] = [];
+    let calls = 0;
+    const provider = createGeminiProvider({
+      apiKey: "test-key-not-a-real-credential",
+      model: "gemini-test-model",
+      client: {
+        async generateContent(request) {
+          calls += 1;
+          seen.push(JSON.stringify(request));
+          throw new ApiError({
+            status: 400,
+            message: `invalid tool request ${secret}`,
+          });
+        },
+      },
+    });
+    const delays: number[] = [];
+    const result = await runDiscoveryAgent({
+      provider,
+      tools: createExperimentTools({ budget: 2 }),
+      maxModelTurns: 4,
+      timeoutMs: 1_000,
+      maxRetries: 3,
+      secrets: [secret],
+      random: () => 1,
+      sleep: async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+    });
+
+    expect(result.status).toBe("provider_failure");
+    expect(result.providerDiagnostic).toEqual({ category: "bad_request", httpStatus: 400 });
+    expect(result.modelTurns).toBe(0);
+    expect(calls).toBe(1);
+    expect(delays).toEqual([]);
+    expect(JSON.stringify(result.transcript)).toContain(PROVIDER_ERROR_MESSAGES.PROVIDER_FAILURE);
+    expect(JSON.stringify({ transcript: result.transcript, requests: seen })).not.toContain(secret);
+    expect(JSON.stringify({ transcript: result.transcript, requests: seen })).not.toContain("bad_request");
+  });
+
+  it("retries HTTP 429 and 503 with backoff, and retries a network failure", async () => {
+    const secret = "AIzaSyTransientFailureKey";
+    const rateLimited = scriptedStatuses([429, 429], secret);
+    const rateDelays: number[] = [];
+    const rateResult = await runDiscoveryAgent({
+      provider: rateLimited.provider,
+      tools: createExperimentTools({ budget: 2 }),
+      maxModelTurns: 1,
+      timeoutMs: 1_000,
+      maxRetries: 2,
+      secrets: [secret],
+      random: () => 0,
+      sleep: async (milliseconds) => {
+        rateDelays.push(milliseconds);
+      },
+    });
+    expect(rateResult.status).toBe("turn_limit");
+    expect(rateResult.providerDiagnostic).toBeNull();
+    expect(rateLimited.calls).toBe(3);
+    expect(rateDelays).toEqual([providerRetryDelayMs(0, 0), providerRetryDelayMs(1, 0)]);
+    expect(JSON.stringify(rateLimited.seen)).not.toContain(secret);
+    expect(JSON.stringify(rateLimited.seen)).not.toContain("rate_limit");
+
+    const unavailable = scriptedStatuses([503, 503, 503], secret);
+    const unavailableDelays: number[] = [];
+    const unavailableResult = await runDiscoveryAgent({
+      provider: unavailable.provider,
+      tools: createExperimentTools({ budget: 2 }),
+      maxModelTurns: 2,
+      timeoutMs: 1_000,
+      maxRetries: 2,
+      secrets: [secret],
+      random: () => 1,
+      sleep: async (milliseconds) => {
+        unavailableDelays.push(milliseconds);
+      },
+    });
+    expect(unavailableResult.status).toBe("provider_failure");
+    expect(unavailableResult.providerDiagnostic).toEqual({ category: "server_error", httpStatus: 503 });
+    expect(unavailable.calls).toBe(3);
+    expect(unavailableDelays).toEqual([
+      providerRetryDelayMs(0, 1),
+      providerRetryDelayMs(1, 1),
+    ]);
+    expect(JSON.stringify(unavailableResult.transcript)).not.toContain(secret);
+    expect(JSON.stringify(unavailable.seen)).not.toContain("server_error");
+
+    const network = scriptedNetwork(secret);
+    const networkDelays: number[] = [];
+    const networkResult = await runDiscoveryAgent({
+      provider: network.provider,
+      tools: createExperimentTools({ budget: 1 }),
+      maxModelTurns: 1,
+      timeoutMs: 1_000,
+      maxRetries: 1,
+      secrets: [secret],
+      random: () => 1,
+      sleep: async (milliseconds) => {
+        networkDelays.push(milliseconds);
+      },
+    });
+    expect(networkResult.status).toBe("provider_failure");
+    expect(networkResult.providerDiagnostic).toEqual({ category: "network", httpStatus: null });
+    expect(network.calls).toBe(2);
+    expect(networkDelays).toEqual([providerRetryDelayMs(0, 1)]);
+    expect(JSON.stringify(networkResult.transcript)).not.toContain(secret);
+    expect(JSON.stringify(network.seen)).not.toContain(secret);
+  });
+
+  it("retries a provider timeout with backoff and still aborts each attempt", async () => {
+    const secret = "AIzaSyTimeoutFailureKey";
+    let calls = 0;
+    let aborts = 0;
+    const provider = createGeminiProvider({
+      apiKey: "test-key-not-a-real-credential",
+      model: "gemini-test-model",
+      client: {
+        generateContent(request) {
+          calls += 1;
+          return new Promise<GeminiGenerateResponse>((_resolve, reject) => {
+            if (request.config.abortSignal?.aborted) {
+              aborts += 1;
+              const error = new Error(`aborted ${secret}`);
+              error.name = "AbortError";
+              reject(error);
+              return;
+            }
+            request.config.abortSignal?.addEventListener("abort", () => {
+              aborts += 1;
+              const error = new Error(`aborted ${secret}`);
+              error.name = "AbortError";
+              reject(error);
+            });
+          });
+        },
+      },
+    });
+    const delays: number[] = [];
+    const result = await runDiscoveryAgent({
+      provider,
+      tools: createExperimentTools({ budget: 1 }),
+      maxModelTurns: 2,
+      timeoutMs: 20,
+      maxRetries: 1,
+      secrets: [secret],
+      random: () => 1,
+      sleep: async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+    });
+
+    expect(result.status).toBe("timeout");
+    expect(result.providerDiagnostic).toEqual({ category: "timeout", httpStatus: null });
+    expect(result.modelTurns).toBe(0);
+    expect(calls).toBe(2);
+    expect(aborts).toBe(2);
+    expect(delays).toEqual([providerRetryDelayMs(0, 1)]);
+    expect(JSON.stringify(result.transcript)).toContain(PROVIDER_ERROR_MESSAGES.TIMEOUT);
+    expect(JSON.stringify(result.transcript)).not.toContain(secret);
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
 });
+
+function scriptedStatuses(statuses: readonly number[], secret: string) {
+  const seen: string[] = [];
+  let calls = 0;
+  const provider = createGeminiProvider({
+    apiKey: "test-key-not-a-real-credential",
+    model: "gemini-test-model",
+    client: {
+      async generateContent(request) {
+        const status = statuses[calls];
+        calls += 1;
+        seen.push(JSON.stringify(request));
+        if (status !== undefined) {
+          throw new ApiError({ status, message: `provider body ${secret}` });
+        }
+        return {
+          functionCalls: [{ id: "after-retry", name: RUN_EXPERIMENT_TOOL, args: { a: 1, b: 1, c: 1 } }],
+        };
+      },
+    },
+  });
+  return {
+    provider,
+    seen,
+    get calls() {
+      return calls;
+    },
+  };
+}
+
+function scriptedNetwork(secret: string) {
+  const seen: string[] = [];
+  let calls = 0;
+  const provider = createGeminiProvider({
+    apiKey: "test-key-not-a-real-credential",
+    model: "gemini-test-model",
+    client: {
+      async generateContent(request) {
+        calls += 1;
+        seen.push(JSON.stringify(request));
+        const error = new TypeError(`fetch failed: ${secret}`);
+        (error as { cause?: unknown }).cause = { code: "ENOTFOUND", message: secret };
+        throw error;
+      },
+    },
+  });
+  return {
+    provider,
+    seen,
+    get calls() {
+      return calls;
+    },
+  };
+}

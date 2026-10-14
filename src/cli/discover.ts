@@ -116,6 +116,7 @@ function operatorReport(result: DiscoverySessionResult): DiscoverySessionResult 
     theoryId: result.theoryId,
     evaluation: result.evaluation,
     evaluationOptions: result.evaluationOptions,
+    providerDiagnostic: result.providerDiagnostic,
     transcript: result.transcript,
   };
 }

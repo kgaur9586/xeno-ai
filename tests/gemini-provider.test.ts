@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { FunctionCallingConfigMode } from "@google/genai";
+import { ApiError, FunctionCallingConfigMode } from "@google/genai";
 import { DISCOVERY_TOOL_DECLARATIONS } from "../src/agents/discovery-tool-declarations.js";
 import { DiscoverArgumentsError, parseDiscoverArgs } from "../src/cli/discover.js";
 import { loadProjectEnv } from "../src/llm/env.js";
@@ -158,6 +158,102 @@ describe("Gemini provider", () => {
     } catch (error) {
       expect(String(error)).not.toContain(API_KEY);
       expect(error instanceof ProviderRequestError ? error.stack : "").not.toContain(API_KEY);
+    }
+  });
+
+  it.each([
+    [400, "bad_request", false],
+    [401, "unauthorized", false],
+    [403, "forbidden", false],
+    [404, "client_error", false],
+    [408, "timeout", true],
+    [429, "rate_limit", true],
+    [500, "server_error", true],
+    [501, "server_error", false],
+    [503, "server_error", true],
+    [504, "server_error", true],
+  ] as const)("classifies HTTP %s without copying the provider body", async (status, category, retryable) => {
+    const body = `prompt text ${API_KEY} authorization=${API_KEY}`;
+    const error = new ApiError({ message: body, status });
+    Object.assign(error, {
+      headers: { "x-goog-api-key": API_KEY },
+      config: { headers: { Authorization: API_KEY } },
+      response: { status, body, headers: { authorization: API_KEY } },
+    });
+    const provider = createGeminiProvider({
+      apiKey: API_KEY,
+      model: MODEL,
+      client: {
+        async generateContent() {
+          throw error;
+        },
+      },
+    });
+
+    await expect(provider.complete(completionRequest())).rejects.toMatchObject({
+      message: PROVIDER_ERROR_MESSAGES.PROVIDER_FAILURE,
+      retryable,
+      diagnostic: { category, httpStatus: status },
+    });
+    try {
+      await provider.complete(completionRequest());
+    } catch (caught) {
+      expect(JSON.stringify(caught)).not.toContain(API_KEY);
+      expect(JSON.stringify(caught)).not.toContain("prompt text");
+      expect(JSON.stringify(caught)).not.toContain("authorization");
+      expect(String(caught)).not.toContain(API_KEY);
+      expect(caught instanceof Error ? caught.stack : "").not.toContain(API_KEY);
+    }
+  });
+
+  it("classifies a network failure from the transport code and not its message", async () => {
+    const error = new TypeError(`fetch failed: ${API_KEY}`);
+    (error as { cause?: unknown }).cause = { code: "ECONNRESET", message: `socket ${API_KEY}` };
+    const provider = createGeminiProvider({
+      apiKey: API_KEY,
+      model: MODEL,
+      client: {
+        async generateContent() {
+          throw error;
+        },
+      },
+    });
+
+    await expect(provider.complete(completionRequest())).rejects.toMatchObject({
+      message: PROVIDER_ERROR_MESSAGES.PROVIDER_FAILURE,
+      retryable: true,
+      diagnostic: { category: "network", httpStatus: null },
+    });
+    try {
+      await provider.complete(completionRequest());
+    } catch (caught) {
+      expect(JSON.stringify(caught)).not.toContain(API_KEY);
+      expect(String(caught)).not.toContain(API_KEY);
+    }
+  });
+
+  it("keeps an aborted request a timeout even when the SDK error carries a status", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const provider = createGeminiProvider({
+      apiKey: API_KEY,
+      model: MODEL,
+      client: {
+        async generateContent() {
+          throw new ApiError({ message: `cancelled ${API_KEY}`, status: 400 });
+        },
+      },
+    });
+
+    await expect(provider.complete(completionRequest({ signal: controller.signal }))).rejects.toMatchObject({
+      message: PROVIDER_ERROR_MESSAGES.TIMEOUT,
+      diagnostic: { category: "timeout", httpStatus: null },
+    });
+    try {
+      await provider.complete(completionRequest({ signal: controller.signal }));
+    } catch (caught) {
+      expect(String(caught)).not.toContain(API_KEY);
+      expect(JSON.stringify(caught)).not.toContain(API_KEY);
     }
   });
 

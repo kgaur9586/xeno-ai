@@ -19,6 +19,8 @@ import {
 } from "@google/genai";
 import { readGeminiConfig } from "./env.js";
 import {
+  classifyProviderError,
+  isAbortError,
   ProviderConfigError,
   ProviderRequestError,
   ProviderTimeoutError,
@@ -87,7 +89,7 @@ export function createGeminiProvider(options: GeminiProviderOptions): LlmProvide
         if (request.signal.aborted || isAbortError(error)) {
           throw new ProviderTimeoutError();
         }
-        throw new ProviderRequestError();
+        throw new ProviderRequestError(classifyProviderError(error));
       }
     },
   };
@@ -350,13 +352,4 @@ function redactSecretsInUnknown(value: unknown, apiKey: string): unknown {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isAbortError(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) {
-    return false;
-  }
-  const name = "name" in error ? error.name : undefined;
-  const code = "code" in error ? error.code : undefined;
-  return name === "AbortError" || code === "ABORT_ERR";
 }

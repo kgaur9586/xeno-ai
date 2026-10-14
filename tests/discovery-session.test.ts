@@ -40,6 +40,7 @@ describe("Discovery session", () => {
     expect(script.callCount).toBe(2);
     expect(result.experimentCount).toBe(1);
     expect(result.remainingBudget).toBe(4);
+    expect(result.providerDiagnostic).toBeNull();
     expect(result.theoryId).toBe(1);
     expect(result.evaluation?.inRange.accuracy).toBe(1);
     expect(result.evaluation?.outOfRange.accuracy).toBe(1);
@@ -87,6 +88,41 @@ describe("Discovery session", () => {
     expect(result.experimentCount).toBe(0);
     expect(result.remainingBudget).toBe(4);
     expect(JSON.stringify(script.requests)).not.toContain("424242");
+    expect(result.providerDiagnostic).toBeNull();
+  });
+
+  it("returns a safe provider diagnostic without scoring or sending it to the model", async () => {
+    const secret = "AIzaSySessionFailureKey";
+    const script = createScriptedProvider([
+      {
+        error: Object.assign(new Error(`request body ${secret}`), {
+          status: 403,
+          headers: { authorization: secret },
+          response: { status: 403, body: secret },
+        }),
+      },
+    ]);
+    const result = await runDiscoverySession({
+      provider: script.provider,
+      budget: 4,
+      maxModelTurns: 3,
+      timeoutMs: 1_000,
+      maxRetries: 2,
+      secrets: [secret],
+      evaluation: EVALUATION,
+    });
+
+    expect(result.status).toBe("provider_failure");
+    expect(result.providerDiagnostic).toEqual({ category: "forbidden", httpStatus: 403 });
+    expect(result.evaluation).toBeNull();
+    expect(result.theoryId).toBeNull();
+    expect(result.submittedTheory).toBeNull();
+    expect(script.callCount).toBe(1);
+    const shownToModel = JSON.stringify({ transcript: result.transcript, requests: script.requests });
+    expect(shownToModel).not.toContain(secret);
+    expect(shownToModel).not.toContain("forbidden");
+    expect(shownToModel).not.toContain("424242");
+    expect(shownToModel).not.toContain("correctPredictions");
   });
 
   it("keeps the session orchestrator separate from the world engine", () => {

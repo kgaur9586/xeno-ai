@@ -7,6 +7,8 @@
  */
 import type { ValidatedTheory } from "../language/theory.js";
 import {
+  classifyProviderError,
+  isAbortError,
   PROVIDER_ERROR_MESSAGES,
   ProviderRequestError,
   ProviderTimeoutError,
@@ -15,6 +17,7 @@ import {
   type LlmCompletionResult,
   type LlmMessage,
   type LlmProvider,
+  type ProviderErrorDiagnostic,
 } from "../llm/provider.js";
 import type { ExperimentTools } from "../tools/experiment-tools.js";
 import { buildDiscoveryPrompt } from "./discovery-prompt.js";
@@ -24,6 +27,8 @@ import { executeDiscoveryTool, notExecutedResult } from "./discovery-tools.js";
 export const DEFAULT_MAX_MODEL_TURNS = 16;
 export const DEFAULT_PROVIDER_TIMEOUT_MS = 60_000;
 export const DEFAULT_PROVIDER_RETRIES = 2;
+export const PROVIDER_RETRY_BASE_MS = 200;
+export const PROVIDER_RETRY_MAX_MS = 2_000;
 
 const MODEL_FEEDBACK = {
   MALFORMED_RESPONSE: "The previous response was not a usable tool call. Call one of the provided tools.",
@@ -59,6 +64,10 @@ export interface DiscoveryAgentOptions {
   maxRetries?: number;
   /** Used only to scrub transcript text. Never inserted into the prompt. */
   secrets?: readonly string[];
+  /** Waits between transient retries. Tests may replace the timer. */
+  sleep?: (milliseconds: number) => Promise<void>;
+  /** Unit interval for retry jitter. Tests may replace this. */
+  random?: () => number;
 }
 
 export interface DiscoveryAgentResult {
@@ -66,6 +75,8 @@ export interface DiscoveryAgentResult {
   transcript: TranscriptEntry[];
   submittedTheory: ValidatedTheory | null;
   modelTurns: number;
+  /** Safe failure facts for the operator. Null when the provider did not stop the run. */
+  providerDiagnostic: ProviderErrorDiagnostic | null;
 }
 
 export async function runDiscoveryAgent(options: DiscoveryAgentOptions): Promise<DiscoveryAgentResult> {
@@ -82,6 +93,8 @@ export async function runDiscoveryAgent(options: DiscoveryAgentOptions): Promise
   const prompt = buildDiscoveryPrompt(options.tools.describeWorld());
   const transcript: TranscriptEntry[] = [];
   const messages: LlmMessage[] = [];
+  const sleep = options.sleep ?? delay;
+  const random = options.random ?? Math.random;
   let modelTurns = 0;
   let submittedTheory: ValidatedTheory | null = null;
 
@@ -101,6 +114,8 @@ export async function runDiscoveryAgent(options: DiscoveryAgentOptions): Promise
       maxRetries,
       transcript,
       secrets,
+      sleep,
+      random,
     );
 
     if (completion instanceof ProviderTimeoutError || completion instanceof ProviderRequestError) {
@@ -109,6 +124,7 @@ export async function runDiscoveryAgent(options: DiscoveryAgentOptions): Promise
         transcript: copyTranscript(transcript),
         submittedTheory: null,
         modelTurns,
+        providerDiagnostic: copyDiagnostic(completion.diagnostic),
       };
     }
 
@@ -121,6 +137,7 @@ export async function runDiscoveryAgent(options: DiscoveryAgentOptions): Promise
         transcript: copyTranscript(transcript),
         submittedTheory,
         modelTurns,
+        providerDiagnostic: null,
       };
     }
   }
@@ -130,6 +147,7 @@ export async function runDiscoveryAgent(options: DiscoveryAgentOptions): Promise
     transcript: copyTranscript(transcript),
     submittedTheory: null,
     modelTurns,
+    providerDiagnostic: null,
   };
 }
 
@@ -240,6 +258,8 @@ async function requestCompletion(
   maxRetries: number,
   transcript: TranscriptEntry[],
   secrets: readonly string[],
+  sleep: (milliseconds: number) => Promise<void>,
+  random: () => number,
 ): Promise<LlmCompletionResult | ProviderTimeoutError | ProviderRequestError> {
   let lastError: ProviderTimeoutError | ProviderRequestError = new ProviderRequestError();
 
@@ -247,8 +267,8 @@ async function requestCompletion(
     try {
       return await completeBounded(provider, request, timeoutMs);
     } catch (error) {
-      lastError = error instanceof ProviderTimeoutError ? error : new ProviderRequestError();
-      const retried = attempt < maxRetries;
+      lastError = toProviderFailure(error);
+      const retried = lastError.retryable && attempt < maxRetries;
       pushTranscript(
         transcript,
         {
@@ -260,10 +280,32 @@ async function requestCompletion(
         },
         secrets,
       );
+      if (!retried) {
+        return lastError;
+      }
+      await sleep(providerRetryDelayMs(attempt, random()));
     }
   }
 
   return lastError;
+}
+
+/**
+ * Bounded exponential delay with equal jitter. `failureIndex` zero is the
+ * delay before the first retry. The unit interval selects the upper half of
+ * the capped delay, so a retry never runs immediately.
+ */
+export function providerRetryDelayMs(failureIndex: number, randomUnit: number): number {
+  const index = Number.isInteger(failureIndex) && failureIndex > 0 ? Math.min(failureIndex, 10) : 0;
+  const ceiling = Math.min(PROVIDER_RETRY_MAX_MS, PROVIDER_RETRY_BASE_MS * 2 ** index);
+  const unit = typeof randomUnit === "number" && Number.isFinite(randomUnit) ? Math.min(1, Math.max(0, randomUnit)) : 0;
+  return Math.round(ceiling * (0.5 + unit * 0.5));
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
 }
 
 async function completeBounded(
@@ -287,23 +329,39 @@ async function completeBounded(
     const isolated = structuredClone(request);
     let completion: Promise<LlmCompletionResult>;
     try {
-      completion = provider.complete({ ...isolated, signal: controller.signal }).then(
+      completion = Promise.resolve(
+        provider.complete({ ...isolated, signal: controller.signal }),
+      ).then(
         (result) => result,
         (error: unknown) => {
-          if (error instanceof ProviderTimeoutError || controller.signal.aborted) {
-            throw new ProviderTimeoutError();
-          }
-          throw new ProviderRequestError();
+          throw toProviderFailure(error, controller.signal.aborted);
         },
       );
-    } catch {
-      throw new ProviderRequestError();
+    } catch (error) {
+      throw toProviderFailure(error, controller.signal.aborted);
     }
     completion.catch(() => undefined);
     return await Promise.race([completion, timeout]);
   } finally {
     clearTimeout(timer);
   }
+}
+
+function toProviderFailure(error: unknown, aborted = false): ProviderTimeoutError | ProviderRequestError {
+  if (aborted || error instanceof ProviderTimeoutError || isAbortError(error)) {
+    return new ProviderTimeoutError();
+  }
+  if (error instanceof ProviderRequestError) {
+    return error;
+  }
+  return new ProviderRequestError(classifyProviderError(error));
+}
+
+function copyDiagnostic(diagnostic: ProviderErrorDiagnostic): ProviderErrorDiagnostic {
+  return {
+    category: diagnostic.category,
+    httpStatus: diagnostic.httpStatus,
+  };
 }
 
 function rememberUser(

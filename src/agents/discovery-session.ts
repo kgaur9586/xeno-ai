@@ -16,7 +16,7 @@ import {
   type DiscoveryStatus,
   type TranscriptEntry,
 } from "./discovery-agent.js";
-import type { LlmProvider } from "../llm/provider.js";
+import type { LlmProvider, ProviderErrorDiagnostic } from "../llm/provider.js";
 
 export interface DiscoverySessionOptions {
   provider: LlmProvider;
@@ -42,6 +42,8 @@ export interface DiscoverySessionResult {
   remainingBudget: number;
   /** Operator-only record of the seeds used after the session. */
   evaluationOptions: TheoryEvaluationOptions;
+  /** Operator-only provider failure facts. Null when the provider did not stop the run. */
+  providerDiagnostic: ProviderErrorDiagnostic | null;
 }
 
 export async function runDiscoverySession(options: DiscoverySessionOptions): Promise<DiscoverySessionResult> {
@@ -73,6 +75,13 @@ export async function runDiscoverySession(options: DiscoverySessionOptions): Pro
     modelTurns: agentResult.modelTurns,
     experimentCount,
     remainingBudget,
+    providerDiagnostic:
+      agentResult.providerDiagnostic === null
+        ? null
+        : {
+            category: agentResult.providerDiagnostic.category,
+            httpStatus: agentResult.providerDiagnostic.httpStatus,
+          },
     evaluationOptions: {
       inRangeSeed: options.evaluation.inRangeSeed,
       outOfRangeSeed: options.evaluation.outOfRangeSeed,
