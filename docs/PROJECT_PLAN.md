@@ -137,7 +137,12 @@ executing generated code**.
 - Expressions represented as a JSON tree (an AST, "abstract syntax tree")
   validated by Zod.
 - A safe interpreter that walks the tree and computes values.
-- Limits: maximum depth, maximum node count, division-by-zero handling.
+- Limits: maximum depth 12, maximum 64 nodes, maximum 4 function arguments,
+  maximum 4096 characters of JSON text, checked by a non-recursive preflight
+  before any recursive step.
+- Safe evaluation errors: division by zero, `sqrt` of a negative number,
+  `log` of zero or a negative number, and non-finite results, each reported
+  as a fixed error code (details in `ARCHITECTURE.md` section 2.4).
 
 **Exit criteria**
 - Valid expressions compute correct values.

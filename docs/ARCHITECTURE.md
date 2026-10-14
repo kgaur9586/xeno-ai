@@ -113,6 +113,45 @@ expressions are JSON trees like this one for `(a - 5) * (b - 5)`:
 Zod checks the tree, and our own interpreter walks it. Only whitelisted
 operations exist, so nothing dangerous can be expressed.
 
+**Node shapes (Phase 3, implemented):**
+
+| Node            | JSON form                                       | Meaning                    |
+| --------------- | ----------------------------------------------- | -------------------------- |
+| Constant        | `{ "const": 5 }`                                | a finite number            |
+| Variable        | `{ "var": "a" }`                                | `a`, `b`, or `c` only      |
+| Operation       | `{ "op": "sub", "left": ..., "right": ... }`    | `add`, `sub`, `mul`, `div` |
+| Function call   | `{ "fn": "sqrt", "args": [ ... ] }`             | `abs`, `sqrt`, `log` take exactly 1 argument; `min`, `max` take 2 to 4 |
+
+`log` is the natural logarithm. Every node must have exactly the fields of
+one shape; anything else is rejected.
+
+**Limits (conservative; the target measurement uses 7 nodes and depth 3):**
+
+| Limit                       | Value | Why                                           |
+| --------------------------- | ----- | --------------------------------------------- |
+| Maximum depth               | 12    | keeps recursion in the interpreter tiny       |
+| Maximum total nodes         | 64    | keeps validation and evaluation cheap         |
+| Maximum function arguments  | 4     | bounds `min` / `max`                          |
+| Maximum JSON text length    | 4096 characters | rejects huge text before parsing    |
+
+**Safety pipeline (`src/language/`):**
+1. `parseExpressionJson` (text only): length check, then `JSON.parse`.
+2. `preflight.ts`: a loop with an explicit work list, not recursion, so a
+   100,000-level input cannot overflow the call stack. It stops at the first
+   exceeded limit, rejects unknown field names and unknown operator,
+   function, or variable names, rejects cycles and reused nodes, and builds a
+   fresh plain copy of the input, reading each property once.
+3. `ExpressionSchema` (Zod, strict): checks the exact shape of the copy.
+4. `interpreter.ts`: one explicit case per operator and function. Rejects
+   division by zero, `sqrt` of a negative number, `log` of zero or a
+   negative number, and any non-finite intermediate result.
+
+Every failure is a fixed code with a fixed message (`errors.ts`), for
+example `{ "code": "DIVISION_BY_ZERO", "message": "Division by zero." }`.
+Messages never repeat the input. The language imports only Zod and its own
+files; it never touches the world engine, the evaluator, the file system,
+or the network.
+
 ### 2.5 Agent (`src/agents/`, Phase 2 scripted, Phase 5 LLM)
 
 **What it is:** The discoverer. It decides which experiments to run, which
@@ -353,7 +392,7 @@ Phase 1 is complete only when all eleven tests pass with `npm test`.
 
 ## 6. Directory structure
 
-All code lives in one package at the project root. Phases 1 and 2 create
+All code lives in one package at the project root. Phases 1 to 3 create
 only these files:
 
 ```
@@ -379,7 +418,18 @@ xeno-ai/
       baseline-comparison.ts  fixed-budget, fixed-seed comparison table
     cli/
       baselines.ts          entry point for `npm run baselines`
+    language/               (Phase 3)
+      errors.ts             fixed error codes and messages
+      expression.ts         node types, allowed names, limits, Zod schema
+      preflight.ts          bounded non-recursive safety pass and copy
+      validate.ts           validateExpression, parseExpressionJson
+      interpreter.ts        evaluateExpression: the safe calculator
   tests/
+    helpers/
+      expression-builders.ts  small helpers for writing expression trees
+    language-validation.test.ts
+    language-interpreter.test.ts
+    language-fuzz.test.ts
     glow-world.test.ts
     experiment-tools.test.ts
     evaluator.test.ts
@@ -410,7 +460,7 @@ Later phases add folders as they are needed, not before:
 | Folder          | Phase | Contents                                |
 | --------------- | ----- | --------------------------------------- |
 | `src/agents/`   | 5     | The LLM agent, next to the baselines    |
-| `src/language/` | 3, 4  | Restricted measurement/theory language  |
+| `src/language/` | 4     | Theory language, next to measurements   |
 | API and web app | 8, 9  | Backend server and React dashboard      |
 
 ---
