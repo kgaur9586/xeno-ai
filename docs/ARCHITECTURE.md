@@ -494,11 +494,13 @@ Phase 5 adds the files in section 8. Phase 6 adds `src/worlds/world.ts`,
 world adds `src/tools/public-types.ts`, `src/agents/discovery-world.ts`, and
 `src/agents/world-comparison.ts` (section 9.6). Phase 7 adds
 `src/worlds/variants.ts`, `src/transfer/refit.ts`, `transfer.ts`,
-`scenarios.ts`, and `src/cli/transfer.ts` (section 10). Later phases add these contents as they are needed, not before:
+`scenarios.ts`, and `src/cli/transfer.ts` (section 10). Phase 8 adds
+`src/api/schemas.ts`, `session-manager.ts`, `app.ts`, and `src/cli/serve.ts`
+(section 11). Later phases add these contents as they are needed, not before:
 
 | Location        | Phase | Contents                             |
 | --------------- | ----- | ------------------------------------ |
-| API and web app | 8, 9  | Backend server and React dashboard   |
+| Web app         | 9     | React dashboard                      |
 
 ---
 
@@ -832,3 +834,101 @@ The adaptation design is random within the public ranges. It is not chosen
 by an agent, so `experimentsToAdapt` measures the theory and the refit, not
 an agent's experimental skill. Ring World cannot be adapted to a rescaled
 attribute, because the circle would need a new scale factor in its form.
+
+---
+
+## 11. Phase 8 backend API
+
+`npm run serve -- [--port <n>] [--live]` starts an HTTP API on 127.0.0.1
+(default port 3000). It uses `node:http` only; there is no web framework.
+
+### 11.1 Stepwise sessions
+
+The agent loop is now a stepper. `createDiscoveryRun(options)` returns
+`step()`, `status()`, and `snapshot()`, and each `step()` runs one model
+turn, including provider retries. `runDiscoveryAgent` loops over it, so the
+CLI and every earlier test behave exactly as before. A second `step()` while
+one is running throws.
+
+`src/api/session-manager.ts` keeps sessions in memory (100 at most by
+default; Phase 10 replaces this with MongoDB). Each session owns its
+experiment tools, its run, and its private settings. Glow World without a
+noise seed uses the original tools, as in the CLI.
+
+### 11.2 Routes
+
+Investigation routes return only what an agent could see or produce:
+
+| Method and path | Returns |
+| --------------- | ------- |
+| `GET /health` | `{ ok: true }` |
+| `GET /worlds` | Public description of every world, without a budget |
+| `POST /sessions` | Creates a session. Body: `worldId`, and optionally `provider` (`dummy` or `gemini`), `budget`, `maxModelTurns`, `timeoutMs`, `maxRetries`, `noiseSeed`. |
+| `GET /sessions` | Public views of every session |
+| `GET /sessions/:id` | Public view: status, turns, budget used, submitted theory, provider diagnostic |
+| `DELETE /sessions/:id` | Removes the session |
+| `GET /sessions/:id/world` | The description the agent was given |
+| `GET /sessions/:id/observations` | The agent-facing observation log |
+| `GET /sessions/:id/transcript?from=n` | Transcript entries from index `n`, with `total` and `nextIndex` |
+| `POST /sessions/:id/steps` | Runs up to `turns` model turns (1 to 32, default 1). Returns the turns run, the new public view, and the new transcript entries. |
+
+Evaluator routes are the only ones that return scores or private settings:
+
+| Method and path | Returns |
+| --------------- | ------- |
+| `POST /evaluator/sessions/:id/evaluations` | Scores the submitted theory with the noise-aware evaluator. Body: optional `inRangeSeed`, `outOfRangeSeed`, `caseCount` (even). |
+| `GET /evaluator/sessions/:id` | The session's noise seed and every stored evaluation |
+
+They need `Authorization: Bearer <XENO_OPERATOR_TOKEN>`, compared in
+constant time. Without a configured token they answer `403
+EVALUATOR_DISABLED`. The token is checked before any lookup, so an
+unauthenticated caller cannot learn whether an evaluator path or session
+exists.
+
+### 11.3 Validation and errors
+
+Every body and query string is parsed with a strict Zod schema in
+`src/api/schemas.ts`. Unknown fields, repeated query keys, and bodies on GET
+or DELETE are rejected. POST bodies must be `application/json` and at most
+16 KiB. Errors use fixed codes and messages and never echo the request:
+
+| Code | Status |
+| ---- | ------ |
+| `INVALID_JSON`, `INVALID_REQUEST`, `UNKNOWN_WORLD`, `PROVIDER_UNAVAILABLE` | 400 |
+| `UNAUTHORIZED` | 401 |
+| `EVALUATOR_DISABLED` | 403 |
+| `NOT_FOUND` | 404 |
+| `METHOD_NOT_ALLOWED` (with `Allow`) | 405 |
+| `SESSION_BUSY`, `SESSION_FINISHED`, `NO_THEORY`, `SESSION_LIMIT` | 409 |
+| `BODY_TOO_LARGE` | 413 |
+| `UNSUPPORTED_MEDIA_TYPE` | 415 |
+| `INTERNAL_ERROR` | 500 |
+
+Every response sets `cache-control: no-store` and
+`x-content-type-options: nosniff`.
+
+### 11.4 Providers and secrets
+
+The dummy provider is always available. Gemini is offered only when the
+server starts with `--live` and both Gemini values are set; otherwise
+`provider: "gemini"` gets `PROVIDER_UNAVAILABLE`. The Gemini key and the
+operator token are passed to the transcript scrubber and are never printed
+or returned. `.env` may hold `XENO_OPERATOR_TOKEN`; the loader still ignores
+every other variable.
+
+### 11.5 Leak tests (`tests/api.test.ts`)
+
+The tests run a real server on a random local port and cover every route. One
+test creates and finishes a session on each world, evaluates it, then reads
+every investigation route. It checks that no investigation response contains
+the noise seed, the evaluation seeds, the operator token, or any of these
+fields: flip rate, noise standard deviation, extrapolation profile,
+accuracy, pass threshold, root mean squared error, noise ceiling, or stored
+evaluations.
+
+### 11.6 Limits
+
+Sessions live in memory and disappear when the server stops. A step request
+stays open until its turns finish, which can take minutes with a live model.
+The server binds to 127.0.0.1 and has no user accounts; the operator token is
+the only access control.

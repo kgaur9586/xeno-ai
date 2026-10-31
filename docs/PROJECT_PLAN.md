@@ -265,6 +265,13 @@ and changed rules do not adapt within 200 experiments. See
 **Exit criteria**
 - API tests cover each endpoint, including leak checks.
 
+**Status:** Done. `npm run serve` starts a dependency-free `node:http` API
+on 127.0.0.1. Sessions are created, stepped one model turn at a time, and
+inspected (world, observations, transcript). Scores come only from
+`/evaluator/` routes, which need `XENO_OPERATOR_TOKEN` and are disabled
+without it. Sessions are kept in memory until Phase 10. See
+`ARCHITECTURE.md` section 11.
+
 ---
 
 ## Phase 9 — React dashboard

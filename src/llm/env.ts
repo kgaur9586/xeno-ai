@@ -1,12 +1,13 @@
 /**
- * Loads only the Gemini settings from a local .env file.
+ * Loads only XENO's own settings from a local .env file: the Gemini settings
+ * and the API's operator token.
  *
  * Other variables in the file are ignored, existing environment values are
  * kept, and the file contents are never logged.
  */
 import { readFileSync } from "node:fs";
 
-const GEMINI_ENV_KEYS = ["GEMINI_API_KEY", "GEMINI_MODEL"] as const;
+const PROJECT_ENV_KEYS = ["GEMINI_API_KEY", "GEMINI_MODEL", "XENO_OPERATOR_TOKEN"] as const;
 
 export function loadProjectEnv(filePath = ".env", env: NodeJS.ProcessEnv = process.env): void {
   let text: string;
@@ -38,7 +39,7 @@ export function readGeminiConfig(env: NodeJS.ProcessEnv): { apiKey: string; mode
   return { apiKey, model };
 }
 
-function parseEnvLine(line: string): { key: (typeof GEMINI_ENV_KEYS)[number]; value: string } | undefined {
+function parseEnvLine(line: string): { key: (typeof PROJECT_ENV_KEYS)[number]; value: string } | undefined {
   const trimmed = line.trim();
   if (trimmed === "" || trimmed.startsWith("#")) {
     return undefined;
@@ -49,14 +50,14 @@ function parseEnvLine(line: string): { key: (typeof GEMINI_ENV_KEYS)[number]; va
     return undefined;
   }
   const key = body.slice(0, separator).trim();
-  if (!isGeminiEnvKey(key)) {
+  if (!isProjectEnvKey(key)) {
     return undefined;
   }
   return { key, value: unquote(body.slice(separator + 1).trim()) };
 }
 
-function isGeminiEnvKey(key: string): key is (typeof GEMINI_ENV_KEYS)[number] {
-  return (GEMINI_ENV_KEYS as readonly string[]).includes(key);
+function isProjectEnvKey(key: string): key is (typeof PROJECT_ENV_KEYS)[number] {
+  return (PROJECT_ENV_KEYS as readonly string[]).includes(key);
 }
 
 function unquote(value: string): string {

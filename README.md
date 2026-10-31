@@ -23,7 +23,8 @@ XENO validates and interprets itself. Generated code is never executed.
 | 5 | Single LLM agent | Done with dummy data; no live Gemini run scored yet |
 | 6 | Richer worlds: noise, numeric outcomes, more distractors, two new worlds | Done; the agent and baselines run on every world |
 | 7 | Transfer to altered worlds | Done, on hand-built source theories |
-| 8 to 11 | API, dashboard, MongoDB, multiple agents | Not started |
+| 8 | Backend HTTP API | Done; sessions are kept in memory |
+| 9 to 11 | Dashboard, MongoDB, multiple agents | Not started |
 
 The full plan is in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md).
 
@@ -80,6 +81,7 @@ set.
 | `npm run discover` | Runs one discovery session with the dummy provider. |
 | `npm run discover -- --live` | Runs one session against Gemini. Requires both `.env` values. |
 | `npm run transfer` | Runs the hand-built transfer cases: does a theory still pass after the world is altered, and how many experiments does adapting it take? |
+| `npm run serve` | Starts the HTTP API on `http://127.0.0.1:3000`. Add `-- --port <n>` to change the port, or `-- --live` to offer Gemini. |
 
 `discover` accepts these options:
 
@@ -105,6 +107,35 @@ npm run discover -- --budget 10 --max-turns 8
 `discover`, `compare`, and `transfer` save a JSON copy of each run (for
 `discover`, including the full transcript) under `runs/`. That folder is ignored by Git. A run is not saved if
 the API key would appear in the file.
+
+## HTTP API
+
+`npm run serve` runs discovery sessions over HTTP. The basic flow:
+
+```bash
+# Create a session (dummy provider by default)
+curl -X POST http://127.0.0.1:3000/sessions -H "content-type: application/json" -d '{"worldId":"ring-world"}'
+
+# Run model turns, one or more per request
+curl -X POST http://127.0.0.1:3000/sessions/<id>/steps -H "content-type: application/json" -d '{"turns":5}'
+
+# Inspect what the agent saw and did
+curl http://127.0.0.1:3000/sessions/<id>/observations
+curl http://127.0.0.1:3000/sessions/<id>/transcript
+```
+
+Scores come only from the evaluator routes under `/evaluator/`. They are
+disabled unless `XENO_OPERATOR_TOKEN` is set (in the environment or `.env`),
+and each request must send it as a bearer token:
+
+```bash
+curl -X POST http://127.0.0.1:3000/evaluator/sessions/<id>/evaluations \
+  -H "authorization: Bearer $XENO_OPERATOR_TOKEN" -H "content-type: application/json" -d '{}'
+```
+
+Every route, request field, and error code is listed in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), section 11. Sessions are kept
+in memory and are lost when the server stops.
 
 ## Reading the results
 
@@ -136,6 +167,7 @@ src/
   agents/      baselines, discovery agent loop, session, comparison
   llm/         provider interface, Gemini adapter, dummy provider
   transfer/    theory refit, transfer metrics, hand-built transfer cases
+  api/         HTTP API: request schemas, in-memory sessions, routes
   shared/      seeded random number generator
   cli/         entry points for the npm commands
 tests/         Vitest suite
@@ -148,7 +180,7 @@ docs/          project plan and architecture
   exit criteria.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): components,   information
   hiding, the Glow World design, benchmark limits, the Phase 5 agent, the
-  Phase 6 worlds, and Phase 7 transfer.
+  Phase 6 worlds, Phase 7 transfer, and the Phase 8 API.
 
 These documents describe the hidden rule. They are never placed in an agent's
 context.

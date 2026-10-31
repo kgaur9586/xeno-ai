@@ -85,7 +85,28 @@ export interface DiscoveryAgentResult {
   providerDiagnostic: ProviderErrorDiagnostic | null;
 }
 
+export type DiscoveryRunSnapshot = Omit<DiscoveryAgentResult, "status"> & { status: DiscoveryStatus | null };
+
+/** A discovery run that advances one model turn per `step()`. */
+export interface DiscoveryRun {
+  /** Runs one model turn (including provider retries). Does nothing once the run has finished. */
+  step(): Promise<void>;
+  /** Null while the run can still take turns. */
+  status(): DiscoveryStatus | null;
+  /** A fresh copy of the current state. */
+  snapshot(): DiscoveryRunSnapshot;
+}
+
 export async function runDiscoveryAgent(options: DiscoveryAgentOptions): Promise<DiscoveryAgentResult> {
+  const run = createDiscoveryRun(options);
+  while (run.status() === null) {
+    await run.step();
+  }
+  const result = run.snapshot();
+  return { ...result, status: result.status! };
+}
+
+export function createDiscoveryRun(options: DiscoveryAgentOptions): DiscoveryRun {
   const maxModelTurns = options.maxModelTurns ?? DEFAULT_MAX_MODEL_TURNS;
   const timeoutMs = options.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS;
   const maxRetries = options.maxRetries ?? DEFAULT_PROVIDER_RETRIES;
@@ -109,54 +130,67 @@ export async function runDiscoveryAgent(options: DiscoveryAgentOptions): Promise
   pushTranscript(transcript, { type: "user_message", text: prompt.userMessage }, secrets);
   messages.push({ role: "user", text: prompt.userMessage });
 
-  while (modelTurns < maxModelTurns) {
-    const completion = await requestCompletion(
-      options.provider,
-      {
-        systemInstruction: prompt.systemInstruction,
-        messages,
-        tools: declarations,
-      },
-      timeoutMs,
-      maxRetries,
-      transcript,
-      secrets,
-      sleep,
-      random,
-    );
-
-    if (completion instanceof ProviderTimeoutError || completion instanceof ProviderRequestError) {
-      return {
-        status: completion instanceof ProviderTimeoutError ? "timeout" : "provider_failure",
-        transcript: copyTranscript(transcript),
-        submittedTheory: null,
-        submittedNumericTheory: null,
-        modelTurns,
-        providerDiagnostic: copyDiagnostic(completion.diagnostic),
-      };
-    }
-
-    modelTurns++;
-    const step = applyCompletion(completion, options.tools, transcript, messages, secrets);
-    if (step.submittedTheory || step.submittedNumericTheory) {
-      return {
-        status: "theory_submitted",
-        transcript: copyTranscript(transcript),
-        submittedTheory: step.submittedTheory,
-        submittedNumericTheory: step.submittedNumericTheory,
-        modelTurns,
-        providerDiagnostic: null,
-      };
-    }
-  }
+  let status: DiscoveryStatus | null = null;
+  let submitted: CompletionStep = NO_THEORY;
+  let providerDiagnostic: ProviderErrorDiagnostic | null = null;
+  let stepping = false;
 
   return {
-    status: "turn_limit",
-    transcript: copyTranscript(transcript),
-    submittedTheory: null,
-    submittedNumericTheory: null,
-    modelTurns,
-    providerDiagnostic: null,
+    async step() {
+      if (status !== null) {
+        return;
+      }
+      if (stepping) {
+        throw new Error("A step is already running.");
+      }
+      stepping = true;
+      try {
+        const completion = await requestCompletion(
+          options.provider,
+          {
+            systemInstruction: prompt.systemInstruction,
+            messages,
+            tools: declarations,
+          },
+          timeoutMs,
+          maxRetries,
+          transcript,
+          secrets,
+          sleep,
+          random,
+        );
+
+        if (completion instanceof ProviderTimeoutError || completion instanceof ProviderRequestError) {
+          status = completion instanceof ProviderTimeoutError ? "timeout" : "provider_failure";
+          providerDiagnostic = copyDiagnostic(completion.diagnostic);
+          return;
+        }
+
+        modelTurns++;
+        const step = applyCompletion(completion, options.tools, transcript, messages, secrets);
+        if (step.submittedTheory || step.submittedNumericTheory) {
+          submitted = step;
+          status = "theory_submitted";
+        } else if (modelTurns >= maxModelTurns) {
+          status = "turn_limit";
+        }
+      } finally {
+        stepping = false;
+      }
+    },
+    status() {
+      return status;
+    },
+    snapshot() {
+      return {
+        status,
+        transcript: copyTranscript(transcript),
+        submittedTheory: submitted.submittedTheory,
+        submittedNumericTheory: submitted.submittedNumericTheory,
+        modelTurns,
+        providerDiagnostic: providerDiagnostic === null ? null : copyDiagnostic(providerDiagnostic),
+      };
+    },
   };
 }
 
