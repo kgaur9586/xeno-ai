@@ -18,7 +18,7 @@ import { DISCOVERY_TOOL_ERROR } from "../src/agents/discovery-tools.js";
 import { LANGUAGE_ERROR_MESSAGES } from "../src/language/errors.js";
 import { THEORY_ERROR } from "../src/language/theory.js";
 import { createGeminiProvider, type GeminiGenerateResponse } from "../src/llm/gemini-provider.js";
-import { ProviderRequestError, PROVIDER_ERROR_MESSAGES } from "../src/llm/provider.js";
+import { ProviderRequestError, PROVIDER_DIAGNOSTIC_MESSAGES, PROVIDER_ERROR_MESSAGES } from "../src/llm/provider.js";
 import { createExperimentTools } from "../src/tools/experiment-tools.js";
 import { ExperimentResultSchema } from "../src/tools/schemas.js";
 import { calls, createScriptedProvider } from "./helpers/scripted-provider.js";
@@ -488,13 +488,69 @@ describe("Discovery agent loop", () => {
     });
 
     expect(result.status).toBe("provider_failure");
-    expect(result.providerDiagnostic).toEqual({ category: "bad_request", httpStatus: 400 });
+    expect(result.providerDiagnostic).toEqual({
+      category: "bad_request",
+      httpStatus: 400,
+      message: "invalid tool request [REDACTED]",
+    });
     expect(result.modelTurns).toBe(0);
     expect(calls).toBe(1);
     expect(delays).toEqual([]);
     expect(JSON.stringify(result.transcript)).toContain(PROVIDER_ERROR_MESSAGES.PROVIDER_FAILURE);
     expect(JSON.stringify({ transcript: result.transcript, requests: seen })).not.toContain(secret);
     expect(JSON.stringify({ transcript: result.transcript, requests: seen })).not.toContain("bad_request");
+    expect(JSON.stringify(result.transcript)).not.toContain("invalid tool request");
+  });
+
+  it("reports a sanitized HTTP 404 message only on the operator result", async () => {
+    const sentence =
+      "models/gemini-test-model is not found for API version v1beta, or is not supported for generateContent.";
+    const leaked = "HIDDEN_THRESHOLD-detail";
+    const seen: string[] = [];
+    let calls = 0;
+    const provider = createGeminiProvider({
+      apiKey: "test-key-not-a-real-credential",
+      model: "gemini-test-model",
+      client: {
+        async generateContent(request) {
+          calls += 1;
+          seen.push(JSON.stringify({ contents: request.contents, system: request.config.systemInstruction }));
+          throw new ApiError({
+            status: 404,
+            message: JSON.stringify({
+              error: {
+                code: 404,
+                message: sentence,
+                status: "NOT_FOUND",
+                details: [{ debugInfo: leaked }],
+              },
+            }),
+          });
+        },
+      },
+    });
+    const result = await runDiscoveryAgent({
+      provider,
+      tools: createExperimentTools({ budget: 1 }),
+      maxModelTurns: 3,
+      timeoutMs: 1_000,
+      maxRetries: 2,
+      sleep: async () => undefined,
+    });
+
+    expect(result.status).toBe("provider_failure");
+    expect(result.modelTurns).toBe(0);
+    expect(calls).toBe(1);
+    expect(result.providerDiagnostic).toEqual({
+      category: "client_error",
+      httpStatus: 404,
+      message: sentence,
+    });
+    const shownToModel = JSON.stringify({ transcript: result.transcript, requests: seen });
+    expect(shownToModel).not.toContain(sentence);
+    expect(shownToModel).not.toContain(leaked);
+    expect(shownToModel).not.toContain("client_error");
+    expect(shownToModel).not.toContain("is not found");
   });
 
   it("retries HTTP 429 and 503 with backoff, and retries a network failure", async () => {
@@ -535,7 +591,11 @@ describe("Discovery agent loop", () => {
       },
     });
     expect(unavailableResult.status).toBe("provider_failure");
-    expect(unavailableResult.providerDiagnostic).toEqual({ category: "server_error", httpStatus: 503 });
+    expect(unavailableResult.providerDiagnostic).toEqual({
+      category: "server_error",
+      httpStatus: 503,
+      message: "provider body [REDACTED]",
+    });
     expect(unavailable.calls).toBe(3);
     expect(unavailableDelays).toEqual([
       providerRetryDelayMs(0, 1),
@@ -559,7 +619,11 @@ describe("Discovery agent loop", () => {
       },
     });
     expect(networkResult.status).toBe("provider_failure");
-    expect(networkResult.providerDiagnostic).toEqual({ category: "network", httpStatus: null });
+    expect(networkResult.providerDiagnostic).toEqual({
+      category: "network",
+      httpStatus: null,
+      message: "fetch failed: [REDACTED]",
+    });
     expect(network.calls).toBe(2);
     expect(networkDelays).toEqual([providerRetryDelayMs(0, 1)]);
     expect(JSON.stringify(networkResult.transcript)).not.toContain(secret);
@@ -609,7 +673,11 @@ describe("Discovery agent loop", () => {
     });
 
     expect(result.status).toBe("timeout");
-    expect(result.providerDiagnostic).toEqual({ category: "timeout", httpStatus: null });
+    expect(result.providerDiagnostic).toEqual({
+      category: "timeout",
+      httpStatus: null,
+      message: PROVIDER_ERROR_MESSAGES.TIMEOUT,
+    });
     expect(result.modelTurns).toBe(0);
     expect(calls).toBe(2);
     expect(aborts).toBe(2);

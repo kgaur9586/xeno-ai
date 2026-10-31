@@ -1,0 +1,128 @@
+# XENO
+
+XENO is an experimental system that tries to discover hidden rules in
+simulated worlds. An agent runs experiments, builds new measurements from raw
+observations, and submits a theory. An evaluator then scores that theory on
+cases the agent never saw, both inside and outside the input ranges the agent
+was allowed to use.
+
+The agent never sees the hidden rule. It gets the public world description,
+its experiment budget, and the results the tools return. Anything the agent
+writes (measurements and theories) is JSON in a small restricted language that
+XENO validates and interprets itself. Generated code is never executed.
+
+## Status
+
+| Phase | Topic | Status |
+| ----- | ----- | ------ |
+| 0 | Planning docs | Done |
+| 1 | Glow World, experiment tools, observation log, evaluator | Done |
+| 2 | Scripted baseline experimenters | Done |
+| 3 | Restricted measurement language | Done |
+| 4 | Theory language, out-of-range scoring, theory registry | Done |
+| 5 | Single LLM agent | Done with dummy data; no live Gemini run scored yet |
+| 6 to 11 | Richer worlds, transfer, API, dashboard, MongoDB, multiple agents | Not started |
+
+The full plan is in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md).
+
+## Requirements
+
+- Node.js (developed and tested on version 24)
+- npm
+
+## Setup
+
+```bash
+npm install
+npm test
+```
+
+No API key is needed for tests or for the default commands. They use a
+scripted dummy provider that makes no network calls.
+
+### Optional: live Gemini runs
+
+Copy `.env.example` to `.env` and fill in both values:
+
+```
+GEMINI_API_KEY=your-key
+GEMINI_MODEL=your-model-name
+```
+
+`.env` is ignored by Git. A live run must also be requested explicitly with
+`--live`; without that flag XENO stays on the dummy provider even if a key is
+set.
+
+## Commands
+
+| Command | What it does |
+| ------- | ------------ |
+| `npm test` | Runs the test suite. |
+| `npm run typecheck` | Type-checks `src` and `tests`. |
+| `npm run build` | Compiles `src` to `dist`. |
+| `npm run baselines` | Prints exploration metrics for the random and grid explorers. These are not discovery scores. |
+| `npm run compare` | Scores the dummy agent and both baselines at the same budget (27) and seed (42). |
+| `npm run discover` | Runs one discovery session with the dummy provider. |
+| `npm run discover -- --live` | Runs one session against Gemini. Requires both `.env` values. |
+
+`discover` accepts these options:
+
+| Option | Default | Meaning |
+| ------ | ------- | ------- |
+| `--budget` | 30 | Experiments the agent may run |
+| `--max-turns` | 16 | Model turns before the session stops |
+| `--timeout-ms` | 60000 | Timeout for each provider request |
+| `--retries` | 2 | Retries after a transient provider failure |
+| `--in-range-seed` | 1 | Seed for the in-range evaluation cases |
+| `--out-of-range-seed` | 2 | Seed for the out-of-range evaluation cases |
+| `--case-count` | 200 | Evaluation cases per set (must be even) |
+| `--live` | off | Use Gemini instead of the dummy provider |
+
+Example:
+
+```bash
+npm run discover -- --budget 10 --max-turns 8
+```
+
+`discover` and `compare` save a JSON copy of each run, including the full
+transcript, under `runs/`. That folder is ignored by Git. A run is not saved if
+the API key would appear in the file.
+
+## Reading the results
+
+- **Dummy results are not model results.** Every dummy run is labeled as such
+  in its output. The dummy explores the same min/mid/max grid as the
+  systematic baseline and picks its theory from a small fixed catalog.
+- **Perfect scores on Glow World are expected and not meaningful.** The
+  catalog uses each public range's midpoint, which happens to match Glow
+  World's private threshold. See
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), section 7.
+- **In-sample accuracy is not discovery.** A theory can fit a strategy's own
+  observations perfectly and still score at chance on held-out cases. Only the
+  evaluator's in-range and out-of-range scores measure discovery.
+
+## Project layout
+
+```
+src/
+  worlds/      world engine; the only place a hidden rule lives
+  tools/       agent-facing experiment tools and strict schemas
+  language/    restricted measurement and theory language
+  evaluator/   held-out case generation, theory scoring, registry
+  agents/      baselines, discovery agent loop, session, comparison
+  llm/         provider interface, Gemini adapter, dummy provider
+  shared/      seeded random number generator
+  cli/         entry points for the npm commands
+tests/         Vitest suite
+docs/          project plan and architecture
+```
+
+## Documentation
+
+- [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md): phases, deliverables, and
+  exit criteria.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): components, information
+  hiding, the Glow World design, benchmark limits, and the Phase 5 agent.
+
+These documents describe the hidden rule. They are never placed in an agent's
+context.

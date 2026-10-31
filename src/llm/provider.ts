@@ -83,11 +83,36 @@ export const PROVIDER_ERROR_CATEGORIES = [
 
 export type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
 
-/** Operator-facing failure facts. Strings from the provider are not copied here. */
+/**
+ * Operator-facing failure facts. `message` is a short sanitized excerpt, never
+ * the raw body, headers, prompt, or tool arguments.
+ */
 export interface ProviderErrorDiagnostic {
   category: ProviderErrorCategory;
   httpStatus: number | null;
+  message: string;
 }
+
+export const PROVIDER_DIAGNOSTIC_MESSAGES = {
+  UNREADABLE: "The provider did not return a readable error message.",
+  OMITTED: "The provider error included request content and was omitted.",
+} as const;
+
+const DIAGNOSTIC_MESSAGE_LIMIT = 240;
+const SENSITIVE_MESSAGE_MARKERS = [
+  "authorization",
+  "x-goog-api-key",
+  "bearer ",
+  "systeminstruction",
+  "system instruction",
+  "functiondeclarations",
+  "function declarations",
+  "parametersjsonschema",
+  "toolconfig",
+  "hidden_threshold",
+  "computeglowoutcome",
+  "prompt text",
+];
 
 const PROVIDER_ERROR_CATEGORY_SET = new Set<string>(PROVIDER_ERROR_CATEGORIES);
 const RETRYABLE_SERVER_STATUSES = new Set([500, 502, 503, 504]);
@@ -111,6 +136,7 @@ const NETWORK_ERROR_CODES = new Set([
 const TIMEOUT_DIAGNOSTIC: ProviderErrorDiagnostic = {
   category: "timeout",
   httpStatus: null,
+  message: PROVIDER_ERROR_MESSAGES.TIMEOUT,
 };
 
 /** The provider did not answer before the deadline. The message is fixed. */
@@ -127,8 +153,8 @@ export class ProviderTimeoutError extends Error {
 
 /**
  * Any other provider failure. The public message stays fixed so a credential
- * in the original error cannot reach the transcript or the console. Only a
- * normalized category and HTTP status are retained.
+ * in the original error cannot reach the transcript or the console. The
+ * diagnostic keeps a normalized category, HTTP status, and sanitized excerpt.
  */
 export class ProviderRequestError extends Error {
   readonly code = "PROVIDER_FAILURE" as const;
@@ -163,21 +189,26 @@ export function isRetryableProviderDiagnostic(diagnostic: ProviderErrorDiagnosti
 }
 
 /**
- * Reads a category and HTTP status from an SDK or transport error.
- * Messages, headers, request bodies, and nested error text are ignored.
+ * Reads a category, HTTP status, and short message from an SDK or transport error.
+ * Headers, request bodies, and nested debug payloads are ignored. `secrets` are
+ * removed from the message before it is returned.
  */
-export function classifyProviderError(error: unknown): ProviderErrorDiagnostic {
+export function classifyProviderError(
+  error: unknown,
+  secrets: readonly string[] = [],
+): ProviderErrorDiagnostic {
   if (isAbortError(error)) {
     return { ...TIMEOUT_DIAGNOSTIC };
   }
+  const message = diagnosticMessageFromError(error, secrets);
   const httpStatus = findHttpStatus(error);
   if (httpStatus !== null) {
-    return { category: categoryForStatus(httpStatus), httpStatus };
+    return { category: categoryForStatus(httpStatus), httpStatus, message };
   }
   if (hasNetworkFailure(error)) {
-    return { category: "network", httpStatus: null };
+    return { category: "network", httpStatus: null, message };
   }
-  return { category: "unknown", httpStatus: null };
+  return { category: "unknown", httpStatus: null, message };
 }
 
 export function isAbortError(error: unknown): boolean {
@@ -189,13 +220,96 @@ export function isAbortError(error: unknown): boolean {
   return name === "AbortError" || code === "ABORT_ERR";
 }
 
-function sanitizeProviderDiagnostic(diagnostic: ProviderErrorDiagnostic | undefined): ProviderErrorDiagnostic {
+function sanitizeProviderDiagnostic(
+  diagnostic: ProviderErrorDiagnostic | undefined,
+  secrets: readonly string[] = [],
+): ProviderErrorDiagnostic {
   if (diagnostic === undefined) {
-    return { category: "unknown", httpStatus: null };
+    return { category: "unknown", httpStatus: null, message: PROVIDER_DIAGNOSTIC_MESSAGES.UNREADABLE };
   }
   const category = isProviderErrorCategory(diagnostic.category) ? diagnostic.category : "unknown";
   const httpStatus = isProviderHttpStatus(diagnostic.httpStatus) ? diagnostic.httpStatus : null;
-  return { category, httpStatus };
+  return { category, httpStatus, message: sanitizeDiagnosticMessage(diagnostic.message, secrets) };
+}
+
+/**
+ * The GenAI SDK stores `JSON.stringify(errorBody)` on `ApiError.message`.
+ * Google's useful text is the nested `error.message` string. This reads that
+ * string, or a plain transport message, and nothing else from the body.
+ */
+function diagnosticMessageFromError(error: unknown, secrets: readonly string[]): string {
+  return sanitizeDiagnosticMessage(readErrorMessage(error, 0, new Set()), secrets);
+}
+
+function readErrorMessage(error: unknown, depth: number, seen: Set<object>): string | null {
+  if (!isWalkable(error, depth, seen)) {
+    return null;
+  }
+  seen.add(error);
+  const record = error as Record<string, unknown>;
+  const direct = candidateMessage(record.message);
+  if (direct !== null) {
+    return direct;
+  }
+  const nested = nestedErrorMessage(record.error);
+  if (nested !== null) {
+    return nested;
+  }
+  return readErrorMessage(record.cause, depth + 1, seen);
+}
+
+function nestedErrorMessage(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  return candidateMessage((value as Record<string, unknown>).message);
+}
+
+function candidateMessage(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    return null;
+  }
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        return null;
+      }
+      return nestedErrorMessage((parsed as Record<string, unknown>).error);
+    } catch {
+      return null;
+    }
+  }
+  return trimmed;
+}
+
+function sanitizeDiagnosticMessage(value: unknown, secrets: readonly string[]): string {
+  if (typeof value !== "string") {
+    return PROVIDER_DIAGNOSTIC_MESSAGES.UNREADABLE;
+  }
+  const collapsed = value.replace(/\s+/g, " ").trim();
+  if (collapsed === "") {
+    return PROVIDER_DIAGNOSTIC_MESSAGES.UNREADABLE;
+  }
+  const redacted = redactCredentialShapes(redactSecrets(collapsed, secrets));
+  if (SENSITIVE_MESSAGE_MARKERS.some((marker) => redacted.toLowerCase().includes(marker))) {
+    return PROVIDER_DIAGNOSTIC_MESSAGES.OMITTED;
+  }
+  if (redacted.length <= DIAGNOSTIC_MESSAGE_LIMIT) {
+    return redacted;
+  }
+  return `${redacted.slice(0, DIAGNOSTIC_MESSAGE_LIMIT - 1).trimEnd()}…`;
+}
+
+function redactCredentialShapes(text: string): string {
+  return text
+    .replace(/\bBearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(/([?&](?:key|api_key|access_token|token)=)[^&\s]+/gi, "$1[REDACTED]")
+    .replace(/\b(x-goog-api-key|authorization|api[_-]?key)\s*[:=]\s*\S+/gi, "$1 [REDACTED]");
 }
 
 function categoryForStatus(status: number): ProviderErrorCategory {

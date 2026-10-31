@@ -193,6 +193,15 @@ experiments, proposes measurements, and states theories using our tools.
 - A leak test confirms no prompt or tool output contains hidden-rule data.
 - Real-LLM runs are reported honestly versus the Phase 2 baselines.
 
+**Status:** The mock loop, tool validation, leak test, transcript file, and
+baseline comparison are in place. `npm run discover` and `npm run compare`
+use a scripted dummy provider and label the result as not a live model.
+`npm run discover -- --live` is the only path that calls Gemini, and it
+requires `GEMINI_API_KEY` and `GEMINI_MODEL`. No live run has been scored yet.
+The dummy-versus-baseline report is the honest stand-in until a key is
+available. On Glow World that report can look perfect because the catalog's
+midpoint coincides with the private threshold; see `ARCHITECTURE.md` section 7.
+
 ---
 
 ## Phase 6 — Richer worlds

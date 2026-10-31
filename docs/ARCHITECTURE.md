@@ -175,7 +175,9 @@ Every experimenter implements the same interface: it receives
 
 **Phases:**
 - Phase 2: simple hand-coded strategies (baselines).
-- Phase 5: an LLM behind a thin provider interface, calling the same tools.
+- Phase 5: one provider behind `LlmProvider`, calling the same experiment
+  tools plus measurement and theory tools. The default provider is a scripted
+  dummy. Gemini is used only when a run opts in with `--live`. See section 8.
 
 ### 2.6 Evaluator (`src/evaluator/`)
 
@@ -485,11 +487,10 @@ Dependencies: `zod` (runtime) plus `typescript` and `vitest` (development
 only). Phase 2 adds `@types/node` (development only, type definitions with
 no runtime code) so tests can read source files for the import check.
 
-Later phases add these contents as they are needed, not before:
+Phase 5 adds the files in section 8. Later phases add these contents as they are needed, not before:
 
 | Location        | Phase | Contents                             |
 | --------------- | ----- | ------------------------------------ |
-| `src/agents/`   | 5     | The LLM agent, next to the baselines |
 | API and web app | 8, 9  | Backend server and React dashboard   |
 
 ---
@@ -527,3 +528,58 @@ Keep these limitations in mind when reading any baseline comparison:
 
 The command's output does not print the threshold itself; it points to this
 section instead.
+
+---
+
+## 8. Phase 5 discovery agent
+
+The discovery agent is one provider calling three tools: `run_experiment`,
+`evaluate_measurement`, and `submit_theory`. Measurements and theories are
+JSON in the restricted language. The agent loop validates every tool call,
+keeps a transcript, and stops on a valid theory, the model-turn limit, or a
+provider failure. `src/agents/discovery-session.ts` scores a submitted theory
+only after that loop returns. Scores, seeds, and held-out cases are not
+written back into the transcript.
+
+| File | Role |
+| ---- | ---- |
+| `src/llm/provider.ts` | `LlmProvider` interface, fixed provider errors |
+| `src/llm/gemini-provider.ts` | Gemini adapter, used only for an opted-in live run |
+| `src/llm/dummy-provider.ts` | Scripted provider. No network call |
+| `src/llm/env.ts` | Reads `GEMINI_API_KEY` and `GEMINI_MODEL` from the environment or `.env` |
+| `src/agents/discovery-prompt.ts` | Prompt built from the public description and tool declarations |
+| `src/agents/discovery-tool-declarations.ts` | The three tool schemas shown to a provider |
+| `src/agents/discovery-tools.ts` | Validates and runs those tools |
+| `src/agents/discovery-agent.ts` | The bounded loop |
+| `src/agents/discovery-session.ts` | Loop, then evaluator |
+| `src/agents/observation-theorist.ts` | Catalog theory fitted to observations and public ranges |
+| `src/agents/discovery-comparison.ts` | Equal-budget scores for the agent and both baselines |
+| `src/agents/discovery-run-log.ts` | Writes an operator copy of a finished run |
+| `src/cli/discover.ts` | `npm run discover` |
+| `src/cli/compare.ts` | `npm run compare` |
+
+`npm run discover` uses the dummy provider unless the command includes
+`--live` and both Gemini variables are set. `npm run compare` always uses the
+dummy provider, at the same budget and seed as `npm run baselines` (27 and
+42). Both commands write a JSON copy under `runs/`. That directory is
+gitignored. The saved file is for the operator. It is not sent to a provider.
+A known API key blocks the save if it would be written into the file.
+
+The dummy provider and the baseline theories share one catalog. Its only
+numeric constants are zero and each public range midpoint. The dummy's
+experiments are the same public min/mid/max grid as the systematic explorer.
+Because that midpoint coincides with Glow World's private threshold (section
+7), a perfect held-out score on this world is not evidence that a live model
+discovered the rule. The comparison text says this, and it says when the
+provider was not a live model. A short all-dark sample can fit perfectly
+in-sample and still score at chance on held-out cases. Those two numbers are
+printed separately.
+
+The dummy provider, the catalog, and the prompt builder do not import the
+world engine or the evaluator. Tests check the prompt, tool results, and
+transcript of a dummy session for private rule data. Searching that text for
+the number 5 is not one of those checks: 5 is a legal input and the public
+midpoint.
+
+Phase 5 adds `@google/genai` so the live adapter can call Gemini. Tests never
+construct a live request. The dummy provider does not import that package.

@@ -81,6 +81,7 @@ export async function runDiscoverySession(options: DiscoverySessionOptions): Pro
         : {
             category: agentResult.providerDiagnostic.category,
             httpStatus: agentResult.providerDiagnostic.httpStatus,
+            message: agentResult.providerDiagnostic.message,
           },
     evaluationOptions: {
       inRangeSeed: options.evaluation.inRangeSeed,

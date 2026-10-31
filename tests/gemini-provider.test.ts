@@ -18,6 +18,7 @@ import {
   ProviderConfigError,
   ProviderRequestError,
   ProviderTimeoutError,
+  PROVIDER_DIAGNOSTIC_MESSAGES,
   PROVIDER_ERROR_MESSAGES,
   type LlmCompletionRequest,
 } from "../src/llm/provider.js";
@@ -257,6 +258,127 @@ describe("Gemini provider", () => {
     }
   });
 
+  it("keeps the Google error.message for HTTP 404, 401, and 403", async () => {
+    const cases = [
+      {
+        status: 404,
+        category: "client_error",
+        message: "models/gemini-test-model is not found for API version v1beta, or is not supported for generateContent.",
+      },
+      {
+        status: 401,
+        category: "unauthorized",
+        message: "API key not valid. Please pass a valid API key.",
+      },
+      {
+        status: 403,
+        category: "forbidden",
+        message: "Permission denied.",
+      },
+    ] as const;
+
+    for (const entry of cases) {
+      const detailSecret = `detail-secret-${entry.status}-${API_KEY}`;
+      const provider = createGeminiProvider({
+        apiKey: API_KEY,
+        model: MODEL,
+        client: {
+          async generateContent() {
+            throw new ApiError({
+              status: entry.status,
+              message: JSON.stringify({
+                error: {
+                  code: entry.status,
+                  message: entry.message,
+                  status: "ERROR",
+                  details: [{ debugInfo: detailSecret, requestBody: "system instruction and tool arguments" }],
+                },
+              }),
+            });
+          },
+        },
+      });
+      await expect(provider.complete(completionRequest())).rejects.toMatchObject({
+        message: PROVIDER_ERROR_MESSAGES.PROVIDER_FAILURE,
+        retryable: false,
+        diagnostic: { category: entry.category, httpStatus: entry.status, message: entry.message },
+      });
+      try {
+        await provider.complete(completionRequest());
+      } catch (caught) {
+        expect(JSON.stringify(caught)).not.toContain(API_KEY);
+        expect(JSON.stringify(caught)).not.toContain(detailSecret);
+        expect(JSON.stringify(caught)).not.toContain("requestBody");
+        expect(JSON.stringify(caught)).not.toContain("system instruction");
+      }
+    }
+  });
+
+  it("omits a diagnostic message that contains a key, headers, a prompt, or tool arguments", async () => {
+    const bearer = "ya29.secret-bearer-token";
+    const toolArguments = JSON.stringify({ a: 4, b: 5, c: 6 });
+    const provider = createGeminiProvider({
+      apiKey: API_KEY,
+      model: MODEL,
+      client: {
+        async generateContent() {
+          throw new ApiError({
+            status: 404,
+            message: JSON.stringify({
+              error: {
+                code: 404,
+                message: `models/x missing. authorization: Bearer ${bearer}. prompt text ${API_KEY}. arguments ${toolArguments}. HIDDEN_THRESHOLD=7. key=${API_KEY}`,
+                status: "NOT_FOUND",
+              },
+            }),
+          });
+        },
+      },
+    });
+
+    await expect(provider.complete(completionRequest())).rejects.toMatchObject({
+      retryable: false,
+      diagnostic: {
+        category: "client_error",
+        httpStatus: 404,
+        message: PROVIDER_DIAGNOSTIC_MESSAGES.OMITTED,
+      },
+    });
+    try {
+      await provider.complete(completionRequest());
+    } catch (caught) {
+      const rendered = JSON.stringify(caught);
+      expect(rendered).not.toContain(API_KEY);
+      expect(rendered).not.toContain(bearer);
+      expect(rendered).not.toContain(toolArguments);
+      expect(rendered).not.toContain("HIDDEN_THRESHOLD");
+      expect(rendered).not.toContain("prompt text");
+      expect(rendered).not.toContain("authorization");
+    }
+  });
+
+  it("uses a fixed message when the provider error has no readable text", async () => {
+    const provider = createGeminiProvider({
+      apiKey: API_KEY,
+      model: MODEL,
+      client: {
+        async generateContent() {
+          throw new Error("   ");
+        },
+      },
+    });
+
+    await expect(provider.complete(completionRequest())).rejects.toMatchObject({
+      message: PROVIDER_ERROR_MESSAGES.PROVIDER_FAILURE,
+      retryable: true,
+      diagnostic: {
+        category: "unknown",
+        httpStatus: null,
+        message: PROVIDER_DIAGNOSTIC_MESSAGES.UNREADABLE,
+      },
+    });
+  });
+
   it("reports an aborted request as a timeout", async () => {
     const client: GeminiGenerateClient = {
       async generateContent() {
@@ -388,7 +510,10 @@ describe("discover command arguments", () => {
       inRangeSeed: 1,
       outOfRangeSeed: 2,
       caseCount: 200,
+      live: false,
     });
+    expect(parseDiscoverArgs(["--live"]).live).toBe(true);
+    expect(() => parseDiscoverArgs(["--live", "--live"])).toThrow(DiscoverArgumentsError);
     expect(parseDiscoverArgs(["--budget", "4", "--retries", "0", "--case-count", "20"])).toMatchObject({
       budget: 4,
       maxRetries: 0,

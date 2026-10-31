@@ -265,9 +265,9 @@ async function requestCompletion(
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return await completeBounded(provider, request, timeoutMs);
+      return await completeBounded(provider, request, timeoutMs, secrets);
     } catch (error) {
-      lastError = toProviderFailure(error);
+      lastError = toProviderFailure(error, false, secrets);
       const retried = lastError.retryable && attempt < maxRetries;
       pushTranscript(
         transcript,
@@ -312,6 +312,7 @@ async function completeBounded(
   provider: LlmProvider,
   request: Omit<LlmCompletionRequest, "signal">,
   timeoutMs: number,
+  secrets: readonly string[],
 ): Promise<LlmCompletionResult> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -334,11 +335,11 @@ async function completeBounded(
       ).then(
         (result) => result,
         (error: unknown) => {
-          throw toProviderFailure(error, controller.signal.aborted);
+          throw toProviderFailure(error, controller.signal.aborted, secrets);
         },
       );
     } catch (error) {
-      throw toProviderFailure(error, controller.signal.aborted);
+      throw toProviderFailure(error, controller.signal.aborted, secrets);
     }
     completion.catch(() => undefined);
     return await Promise.race([completion, timeout]);
@@ -347,20 +348,25 @@ async function completeBounded(
   }
 }
 
-function toProviderFailure(error: unknown, aborted = false): ProviderTimeoutError | ProviderRequestError {
+function toProviderFailure(
+  error: unknown,
+  aborted = false,
+  secrets: readonly string[] = [],
+): ProviderTimeoutError | ProviderRequestError {
   if (aborted || error instanceof ProviderTimeoutError || isAbortError(error)) {
     return new ProviderTimeoutError();
   }
   if (error instanceof ProviderRequestError) {
     return error;
   }
-  return new ProviderRequestError(classifyProviderError(error));
+  return new ProviderRequestError(classifyProviderError(error, secrets));
 }
 
 function copyDiagnostic(diagnostic: ProviderErrorDiagnostic): ProviderErrorDiagnostic {
   return {
     category: diagnostic.category,
     httpStatus: diagnostic.httpStatus,
+    message: diagnostic.message,
   };
 }
 

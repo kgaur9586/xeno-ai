@@ -1,17 +1,23 @@
 /**
- * Runs one real discovery session.
+ * Runs one discovery session and saves a copy under runs/.
  *
- * Reads GEMINI_API_KEY and GEMINI_MODEL from the environment, or from a local
- * .env file if those variables are unset. The key is never printed.
+ * Without `--live`, the scripted dummy provider is used and no network call is
+ * made. `--live` reads GEMINI_API_KEY and GEMINI_MODEL from the environment or
+ * from a local .env file. The key is never printed.
  *
- * Evaluation scores are printed for the operator after the model has finished.
- * They are not part of the conversation that was sent to the model.
+ * Evaluation scores are printed for the operator after the provider has
+ * finished. They are not part of the conversation that was sent to the provider.
  */
 import { pathToFileURL } from "node:url";
+import { discoveryRunFileName, saveRunFile } from "../agents/discovery-run-log.js";
 import { runDiscoverySession, type DiscoverySessionResult } from "../agents/discovery-session.js";
-import { loadProjectEnv } from "../llm/env.js";
+import { loadProjectEnv, readGeminiConfig } from "../llm/env.js";
+import { createDummyProvider } from "../llm/dummy-provider.js";
 import { createGeminiProviderFromEnv } from "../llm/gemini-provider.js";
-import { PROVIDER_ERROR_MESSAGES, ProviderConfigError } from "../llm/provider.js";
+import { PROVIDER_ERROR_MESSAGES, ProviderConfigError, type LlmProvider } from "../llm/provider.js";
+
+export const DUMMY_SESSION_NOTICE =
+  "DUMMY DATA: the scripted dummy provider ran this session. No live model was called.";
 
 const INTEGER_OPTIONS = {
   "--budget": { fallback: 30, minimum: 1 },
@@ -40,12 +46,44 @@ export interface DiscoverArguments {
   inRangeSeed: number;
   outOfRangeSeed: number;
   caseCount: number;
+  /** Live Gemini is opt-in. The default is the scripted dummy provider. */
+  live: boolean;
+}
+
+export interface DiscoveryProviderChoice {
+  provider: LlmProvider;
+  liveModel: boolean;
+  label: string;
+}
+
+/** Uses Gemini only when `live` is set and both environment values are present. */
+export function resolveDiscoveryProvider(env: NodeJS.ProcessEnv, live: boolean): DiscoveryProviderChoice {
+  if (!live) {
+    return { provider: createDummyProvider(), liveModel: false, label: "dummy" };
+  }
+  const { apiKey, model } = readGeminiConfig(env);
+  if (apiKey === "" || model === "") {
+    throw new ProviderConfigError();
+  }
+  return {
+    provider: createGeminiProviderFromEnv(env),
+    liveModel: true,
+    label: `gemini:${model}`,
+  };
 }
 
 export function parseDiscoverArgs(argv: readonly string[]): DiscoverArguments {
   const values = new Map<IntegerOption, number>();
+  let live = false;
   for (let index = 0; index < argv.length; index++) {
     const token = argv[index];
+    if (token === "--live") {
+      if (live) {
+        throw new DiscoverArgumentsError();
+      }
+      live = true;
+      continue;
+    }
     if (token === undefined || !isIntegerOption(token)) {
       throw new DiscoverArgumentsError();
     }
@@ -73,6 +111,7 @@ export function parseDiscoverArgs(argv: readonly string[]): DiscoverArguments {
     inRangeSeed: values.get("--in-range-seed") ?? INTEGER_OPTIONS["--in-range-seed"].fallback,
     outOfRangeSeed: values.get("--out-of-range-seed") ?? INTEGER_OPTIONS["--out-of-range-seed"].fallback,
     caseCount: values.get("--case-count") ?? INTEGER_OPTIONS["--case-count"].fallback,
+    live,
   };
 }
 
@@ -80,22 +119,40 @@ async function main(): Promise<void> {
   try {
     loadProjectEnv();
     const args = parseDiscoverArgs(process.argv.slice(2));
+    const choice = resolveDiscoveryProvider(process.env, args.live);
     const apiKey = process.env.GEMINI_API_KEY?.trim() ?? "";
-    const provider = createGeminiProviderFromEnv();
+    const secrets = apiKey === "" ? [] : [apiKey];
     const result = await runDiscoverySession({
-      provider,
+      provider: choice.provider,
       budget: args.budget,
       maxModelTurns: args.maxModelTurns,
       timeoutMs: args.timeoutMs,
       maxRetries: args.maxRetries,
-      secrets: apiKey === "" ? [] : [apiKey],
+      secrets,
       evaluation: {
         inRangeSeed: args.inRangeSeed,
         outOfRangeSeed: args.outOfRangeSeed,
         caseCount: args.caseCount,
       },
     });
-    process.stdout.write(`${JSON.stringify(operatorReport(result), null, 2)}\n`);
+    const savedAt = new Date();
+    const savedTo = saveRunFile({
+      directory: "runs",
+      fileName: discoveryRunFileName(savedAt, choice.liveModel ? "gemini" : "dummy", result.status),
+      secrets,
+      body: {
+        savedAt: savedAt.toISOString(),
+        provider: choice.label,
+        liveModel: choice.liveModel,
+        result,
+      },
+    });
+    if (!choice.liveModel) {
+      process.stderr.write(`${DUMMY_SESSION_NOTICE}\n`);
+    }
+    process.stdout.write(
+      `${JSON.stringify({ savedTo, provider: choice.label, liveModel: choice.liveModel, ...operatorReport(result) }, null, 2)}\n`,
+    );
   } catch (error) {
     if (error instanceof ProviderConfigError || error instanceof DiscoverArgumentsError) {
       process.stderr.write(`${error.message}\n`);

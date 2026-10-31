@@ -113,7 +113,11 @@ describe("Discovery session", () => {
     });
 
     expect(result.status).toBe("provider_failure");
-    expect(result.providerDiagnostic).toEqual({ category: "forbidden", httpStatus: 403 });
+    expect(result.providerDiagnostic).toEqual({
+      category: "forbidden",
+      httpStatus: 403,
+      message: "request body [REDACTED]",
+    });
     expect(result.evaluation).toBeNull();
     expect(result.theoryId).toBeNull();
     expect(result.submittedTheory).toBeNull();

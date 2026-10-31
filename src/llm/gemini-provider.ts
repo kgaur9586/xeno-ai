@@ -89,7 +89,7 @@ export function createGeminiProvider(options: GeminiProviderOptions): LlmProvide
         if (request.signal.aborted || isAbortError(error)) {
           throw new ProviderTimeoutError();
         }
-        throw new ProviderRequestError(classifyProviderError(error));
+        throw new ProviderRequestError(classifyProviderError(error, [apiKey]));
       }
     },
   };
