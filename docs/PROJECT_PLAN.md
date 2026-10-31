@@ -284,6 +284,13 @@ without it. Sessions are kept in memory until Phase 10. See
 **Exit criteria**
 - Component tests for key views; the dashboard works against the real API.
 
+**Status:** Done. A React dashboard in `web/` shows the session list, an
+experiment timeline, measurements, a theory table, and score charts. It is
+built with Vite into `dist-web/` and served by `npm run serve` at
+`/dashboard/`. Scores appear only after the operator enters the token. Tests
+render every key view, and run the full app against a real API server. See
+`ARCHITECTURE.md` section 12.
+
 ---
 
 ## Phase 10 — MongoDB persistence

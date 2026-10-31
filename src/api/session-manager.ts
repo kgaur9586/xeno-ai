@@ -1,44 +1,53 @@
 /**
- * In-memory discovery sessions for the HTTP API.
+ * Discovery sessions for the HTTP API, persisted through a `SessionStore`.
  *
- * A session owns its experiment tools and a stepwise discovery run. Public
- * views contain only what the agent itself could see or produce: the public
- * world description, the transcript, the observation log, and the submitted
- * theory. The noise seed, evaluation options, and evaluator reports are kept
- * apart and only reach the evaluator-only views.
+ * Public views contain only what the agent itself could see or produce: the
+ * public world description, the transcript, the observation log, and the
+ * submitted theory. The noise seed, evaluation options, and evaluator reports
+ * are stored with the session but only reach the evaluator-only views.
+ *
+ * Running sessions keep a live agent run in memory. After a restart a
+ * running session is rebuilt on its next step: its stored experiments are
+ * replayed through fresh tools with the same private noise seed (rejected
+ * requests draw no noise, so the stream lines up), every replayed outcome
+ * must match the stored one, and the stored conversation is resumed.
+ * Progress is saved after every model turn.
  */
 import { randomUUID } from "node:crypto";
-import { createDiscoveryRun, type DiscoveryRun, type DiscoveryStatus, type TranscriptEntry } from "../agents/discovery-agent.js";
+import { createDiscoveryRun, type DiscoveryRun, type TranscriptEntry } from "../agents/discovery-agent.js";
 import { GLOW_WORLD_SESSION_ID } from "../agents/discovery-session.js";
-import {
-  evaluateWorldTheoryById,
-  type AnyWorldReport,
-  type WorldEvaluationOptions,
-} from "../evaluator/world-evaluator.js";
+import { evaluateWorldTheoryById, type WorldEvaluationOptions } from "../evaluator/world-evaluator.js";
 import type { LlmProvider, ProviderErrorDiagnostic } from "../llm/provider.js";
+import {
+  createMemorySessionStore,
+  type ProviderKind,
+  type SessionProgress,
+  type SessionRecord,
+  type SessionStatus,
+  type SessionStore,
+  type StoredEvaluation,
+  type StoredTheory,
+} from "../storage/session-store.js";
 import { createExperimentTools } from "../tools/experiment-tools.js";
 import type { AnyExperimentTools, AnyObservation, AnyWorldDescription } from "../tools/public-types.js";
 import { createWorldToolsById } from "../tools/world-tools.js";
 import { WORLD_IDS } from "../worlds/registry.js";
 import { ApiError, type CreateSessionRequest } from "./schemas.js";
 
-export const DEFAULT_MAX_SESSIONS = 100;
+export type { ProviderKind, StoredEvaluation } from "../storage/session-store.js";
+export type PublicTheory = StoredTheory;
 
-export type ProviderKind = "dummy" | "gemini";
+export const DEFAULT_MAX_SESSIONS = 100;
 
 export interface SessionManagerOptions {
   /** Provider factories. A kind without a factory is not available. */
   providers: Partial<Record<ProviderKind, () => LlmProvider>>;
+  /** Defaults to an in-memory store. */
+  store?: SessionStore;
   /** Scrubbed from transcripts. Never returned. */
   secrets?: readonly string[];
   maxSessions?: number;
   now?: () => Date;
-}
-
-export interface PublicTheory {
-  measurement: unknown;
-  operator?: string;
-  threshold?: number;
 }
 
 export interface PublicSessionView {
@@ -46,7 +55,8 @@ export interface PublicSessionView {
   worldId: string;
   provider: ProviderKind;
   createdAt: string;
-  status: DiscoveryStatus | "running";
+  updatedAt: string;
+  status: SessionStatus;
   modelTurns: number;
   maxModelTurns: number;
   budget: number;
@@ -54,13 +64,6 @@ export interface PublicSessionView {
   remainingBudget: number;
   submittedTheory: PublicTheory | null;
   providerDiagnostic: ProviderErrorDiagnostic | null;
-}
-
-export interface StoredEvaluation {
-  evaluationId: number;
-  evaluatedAt: string;
-  options: WorldEvaluationOptions;
-  report: AnyWorldReport;
 }
 
 export interface OperatorSessionView {
@@ -71,69 +74,103 @@ export interface OperatorSessionView {
   evaluations: StoredEvaluation[];
 }
 
-interface Session {
-  id: string;
-  worldId: string;
-  provider: ProviderKind;
-  createdAt: string;
-  budget: number;
-  maxModelTurns: number;
+interface LiveSession {
   tools: AnyExperimentTools;
   run: DiscoveryRun;
-  busy: boolean;
-  noiseSeed: number | null;
-  evaluations: StoredEvaluation[];
 }
 
 export interface SessionManager {
+  readonly storageKind: SessionStore["kind"];
   worldIds(): readonly string[];
   publicWorld(worldId: string): Omit<AnyWorldDescription, "experimentBudget">;
-  create(request: CreateSessionRequest): PublicSessionView;
-  list(): PublicSessionView[];
-  view(sessionId: string): PublicSessionView;
-  world(sessionId: string): AnyWorldDescription;
-  observations(sessionId: string): AnyObservation[];
-  transcript(sessionId: string, from: number): { entries: TranscriptEntry[]; total: number; nextIndex: number };
+  create(request: CreateSessionRequest): Promise<PublicSessionView>;
+  list(): Promise<PublicSessionView[]>;
+  view(sessionId: string): Promise<PublicSessionView>;
+  world(sessionId: string): Promise<AnyWorldDescription>;
+  observations(sessionId: string): Promise<AnyObservation[]>;
+  transcript(sessionId: string, from: number): Promise<{ entries: TranscriptEntry[]; total: number; nextIndex: number }>;
   step(sessionId: string, turns: number): Promise<{ turnsRun: number; session: PublicSessionView; entries: TranscriptEntry[] }>;
-  remove(sessionId: string): void;
-  evaluate(sessionId: string, options: WorldEvaluationOptions): StoredEvaluation;
-  operatorView(sessionId: string): OperatorSessionView;
+  remove(sessionId: string): Promise<void>;
+  evaluate(sessionId: string, options: WorldEvaluationOptions): Promise<StoredEvaluation>;
+  operatorView(sessionId: string): Promise<OperatorSessionView>;
 }
 
 export function createSessionManager(options: SessionManagerOptions): SessionManager {
-  const sessions = new Map<string, Session>();
+  const store = options.store ?? createMemorySessionStore();
   const maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
   const now = options.now ?? (() => new Date());
   const secrets = options.secrets ?? [];
+  const live = new Map<string, LiveSession>();
+  const busy = new Set<string>();
 
-  function get(sessionId: string): Session {
-    const session = sessions.get(sessionId);
-    if (session === undefined) {
+  async function load(sessionId: string): Promise<SessionRecord> {
+    const record = await store.get(sessionId);
+    if (record === null) {
       throw new ApiError("NOT_FOUND");
     }
-    return session;
+    return record;
   }
 
-  function publicView(session: Session): PublicSessionView {
+  function openTools(record: Pick<SessionRecord, "worldId" | "config">): AnyExperimentTools {
+    const { budget, noiseSeed } = record.config;
+    return record.worldId === GLOW_WORLD_SESSION_ID && noiseSeed === null
+      ? createExperimentTools({ budget })
+      : createWorldToolsById(record.worldId, { budget, noiseSeed: noiseSeed ?? undefined });
+  }
+
+  function providerFor(kind: ProviderKind): LlmProvider {
+    const factory = options.providers[kind];
+    if (factory === undefined) {
+      throw new ApiError("PROVIDER_UNAVAILABLE");
+    }
+    return factory();
+  }
+
+  function runOptions(record: Pick<SessionRecord, "provider" | "config">, tools: AnyExperimentTools) {
+    return {
+      provider: providerFor(record.provider),
+      tools,
+      maxModelTurns: record.config.maxModelTurns,
+      timeoutMs: record.config.timeoutMs,
+      maxRetries: record.config.maxRetries,
+      secrets,
+    };
+  }
+
+  function rehydrate(record: SessionRecord): LiveSession {
+    const tools = openTools(record);
+    for (const observation of record.observations) {
+      const replayed = tools.runExperiment({ ...observation.inputs });
+      if (!replayed.ok || JSON.stringify(replayed.observation) !== JSON.stringify(observation)) {
+        throw new ApiError("SESSION_CORRUPT");
+      }
+    }
+    const run = createDiscoveryRun(runOptions(record, tools), {
+      transcript: record.transcript,
+      messages: record.messages,
+      modelTurns: record.modelTurns,
+    });
+    return { tools, run };
+  }
+
+  function progressOf(session: LiveSession): SessionProgress {
     const snapshot = session.run.snapshot();
     const theory = snapshot.submittedTheory ?? snapshot.submittedNumericTheory;
     return {
-      sessionId: session.id,
-      worldId: session.worldId,
-      provider: session.provider,
-      createdAt: session.createdAt,
       status: snapshot.status ?? "running",
       modelTurns: snapshot.modelTurns,
-      maxModelTurns: session.maxModelTurns,
-      budget: session.budget,
-      experimentCount: session.tools.getObservationLog().length,
-      remainingBudget: session.tools.getRemainingBudget(),
+      transcript: snapshot.transcript,
+      messages: session.run.messages(),
+      observations: session.tools.getObservationLog(),
       submittedTheory: theory === null ? null : copyTheory(theory),
       providerDiagnostic: snapshot.providerDiagnostic,
+      updatedAt: now().toISOString(),
     };
   }
 
   return {
+    storageKind: store.kind,
+
     worldIds() {
       return WORLD_IDS;
     },
@@ -146,132 +183,160 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
       return description;
     },
 
-    create(request) {
+    async create(request) {
       if (!WORLD_IDS.includes(request.worldId)) {
         throw new ApiError("UNKNOWN_WORLD");
       }
-      const factory = options.providers[request.provider];
-      if (factory === undefined) {
+      if (options.providers[request.provider] === undefined) {
         throw new ApiError("PROVIDER_UNAVAILABLE");
       }
-      if (sessions.size >= maxSessions) {
+      if ((await store.count()) >= maxSessions) {
         throw new ApiError("SESSION_LIMIT");
       }
-      const tools: AnyExperimentTools =
-        request.worldId === GLOW_WORLD_SESSION_ID && request.noiseSeed === undefined
-          ? createExperimentTools({ budget: request.budget })
-          : createWorldToolsById(request.worldId, { budget: request.budget, noiseSeed: request.noiseSeed });
-      const run = createDiscoveryRun({
-        provider: factory(),
-        tools,
-        maxModelTurns: request.maxModelTurns,
-        timeoutMs: request.timeoutMs,
-        maxRetries: request.maxRetries,
-        secrets,
-      });
-      const session: Session = {
-        id: randomUUID(),
+      const createdAt = now().toISOString();
+      const base = {
+        sessionId: randomUUID(),
         worldId: request.worldId,
         provider: request.provider,
-        createdAt: now().toISOString(),
-        budget: request.budget,
-        maxModelTurns: request.maxModelTurns,
-        tools,
-        run,
-        busy: false,
-        noiseSeed: request.noiseSeed ?? null,
+        createdAt,
+        config: {
+          budget: request.budget,
+          maxModelTurns: request.maxModelTurns,
+          timeoutMs: request.timeoutMs,
+          maxRetries: request.maxRetries,
+          noiseSeed: request.noiseSeed ?? null,
+        },
         evaluations: [],
       };
-      sessions.set(session.id, session);
-      return publicView(session);
+      const tools = openTools(base);
+      const session: LiveSession = { tools, run: createDiscoveryRun(runOptions(base, tools)) };
+      const record: SessionRecord = { ...base, ...progressOf(session), updatedAt: createdAt };
+      await store.insert(record);
+      live.set(record.sessionId, session);
+      return publicView(record);
     },
 
-    list() {
-      return [...sessions.values()].map(publicView);
+    async list() {
+      return (await store.list()).map(publicView);
     },
 
-    view(sessionId) {
-      return publicView(get(sessionId));
+    async view(sessionId) {
+      return publicView(await load(sessionId));
     },
 
-    world(sessionId) {
-      return get(sessionId).tools.describeWorld();
+    async world(sessionId) {
+      const record = await load(sessionId);
+      return openTools(record).describeWorld();
     },
 
-    observations(sessionId) {
-      return get(sessionId).tools.getObservationLog();
+    async observations(sessionId) {
+      return (await load(sessionId)).observations;
     },
 
-    transcript(sessionId, from) {
-      const entries = get(sessionId).run.snapshot().transcript;
-      const slice = entries.slice(from);
-      return { entries: slice, total: entries.length, nextIndex: Math.max(from, entries.length) };
+    async transcript(sessionId, from) {
+      const entries = (await load(sessionId)).transcript;
+      return { entries: entries.slice(from), total: entries.length, nextIndex: Math.max(from, entries.length) };
     },
 
     async step(sessionId, turns) {
-      const session = get(sessionId);
-      if (session.busy) {
+      if (busy.has(sessionId)) {
         throw new ApiError("SESSION_BUSY");
       }
-      if (session.run.status() !== null) {
-        throw new ApiError("SESSION_FINISHED");
-      }
-      session.busy = true;
-      const before = session.run.snapshot().transcript.length;
-      let turnsRun = 0;
+      busy.add(sessionId);
       try {
+        const record = await load(sessionId);
+        if (record.status !== "running") {
+          live.delete(sessionId);
+          throw new ApiError("SESSION_FINISHED");
+        }
+        let session = live.get(sessionId);
+        if (session === undefined) {
+          session = rehydrate(record);
+          live.set(sessionId, session);
+        }
+        const before = record.transcript.length;
+        let turnsRun = 0;
+        let progress = progressOf(session);
         while (turnsRun < turns && session.run.status() === null) {
           await session.run.step();
           turnsRun++;
+          progress = progressOf(session);
+          if (!(await store.saveProgress(sessionId, progress))) {
+            live.delete(sessionId);
+            throw new ApiError("NOT_FOUND");
+          }
         }
+        if (session.run.status() !== null) {
+          live.delete(sessionId);
+        }
+        return {
+          turnsRun,
+          session: publicView({ ...record, ...progress }),
+          entries: progress.transcript.slice(before),
+        };
       } finally {
-        session.busy = false;
+        busy.delete(sessionId);
       }
-      return {
-        turnsRun,
-        session: publicView(session),
-        entries: session.run.snapshot().transcript.slice(before),
-      };
     },
 
-    remove(sessionId) {
-      const session = get(sessionId);
-      if (session.busy) {
+    async remove(sessionId) {
+      if (busy.has(sessionId)) {
         throw new ApiError("SESSION_BUSY");
       }
-      sessions.delete(sessionId);
+      if (!(await store.remove(sessionId))) {
+        throw new ApiError("NOT_FOUND");
+      }
+      live.delete(sessionId);
     },
 
-    evaluate(sessionId, evaluation) {
-      const session = get(sessionId);
-      const snapshot = session.run.snapshot();
-      const theory = snapshot.submittedTheory ?? snapshot.submittedNumericTheory;
-      if (theory === null) {
+    async evaluate(sessionId, evaluation) {
+      const record = await load(sessionId);
+      if (record.submittedTheory === null) {
         throw new ApiError("NO_THEORY");
       }
-      const result = evaluateWorldTheoryById(session.worldId, copyTheory(theory), evaluation);
+      const result = evaluateWorldTheoryById(record.worldId, copyTheory(record.submittedTheory), evaluation);
       if (!result.ok) {
         throw new ApiError("INTERNAL_ERROR");
       }
       const stored: StoredEvaluation = {
-        evaluationId: session.evaluations.length + 1,
+        evaluationId: record.evaluations.length + 1,
         evaluatedAt: now().toISOString(),
         options: { ...evaluation },
         report: result.report,
       };
-      session.evaluations.push(stored);
+      if (!(await store.appendEvaluation(sessionId, stored))) {
+        throw new ApiError("NOT_FOUND");
+      }
       return structuredClone(stored);
     },
 
-    operatorView(sessionId) {
-      const session = get(sessionId);
+    async operatorView(sessionId) {
+      const record = await load(sessionId);
       return {
-        sessionId: session.id,
-        worldId: session.worldId,
-        noiseSeed: session.noiseSeed,
-        evaluations: structuredClone(session.evaluations),
+        sessionId: record.sessionId,
+        worldId: record.worldId,
+        noiseSeed: record.config.noiseSeed,
+        evaluations: record.evaluations,
       };
     },
+  };
+}
+
+function publicView(record: SessionRecord): PublicSessionView {
+  return {
+    sessionId: record.sessionId,
+    worldId: record.worldId,
+    provider: record.provider,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    status: record.status,
+    modelTurns: record.modelTurns,
+    maxModelTurns: record.config.maxModelTurns,
+    budget: record.config.budget,
+    experimentCount: record.observations.length,
+    remainingBudget: record.config.budget - record.observations.length,
+    submittedTheory: record.submittedTheory === null ? null : copyTheory(record.submittedTheory),
+    providerDiagnostic: record.providerDiagnostic,
   };
 }
 

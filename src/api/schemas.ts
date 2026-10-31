@@ -66,6 +66,8 @@ export const API_ERRORS = {
   BODY_TOO_LARGE: { status: 413, message: "Request body is too large." },
   UNSUPPORTED_MEDIA_TYPE: { status: 415, message: "Request body must be application/json." },
   INTERNAL_ERROR: { status: 500, message: "Internal error." },
+  SESSION_CORRUPT: { status: 500, message: "The stored session could not be restored." },
+  STORAGE_UNAVAILABLE: { status: 503, message: "Session storage is unavailable." },
 } as const;
 
 export type ApiErrorCode = keyof typeof API_ERRORS;

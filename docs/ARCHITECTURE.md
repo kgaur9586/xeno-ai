@@ -496,11 +496,8 @@ world adds `src/tools/public-types.ts`, `src/agents/discovery-world.ts`, and
 `src/worlds/variants.ts`, `src/transfer/refit.ts`, `transfer.ts`,
 `scenarios.ts`, and `src/cli/transfer.ts` (section 10). Phase 8 adds
 `src/api/schemas.ts`, `session-manager.ts`, `app.ts`, and `src/cli/serve.ts`
-(section 11). Later phases add these contents as they are needed, not before:
-
-| Location        | Phase | Contents                             |
-| --------------- | ----- | ------------------------------------ |
-| Web app         | 9     | React dashboard                      |
+(section 11). Phase 9 adds the React dashboard in `web/`, built into
+`dist-web/`, plus `vitest.config.ts` (section 12).
 
 ---
 
@@ -932,3 +929,68 @@ Sessions live in memory and disappear when the server stops. A step request
 stays open until its turns finish, which can take minutes with a live model.
 The server binds to 127.0.0.1 and has no user accounts; the operator token is
 the only access control.
+
+---
+
+## 12. Phase 9 React dashboard
+
+The dashboard is a React 19 single-page app in `web/`, built with Vite. It
+talks only to the Phase 8 API.
+
+### 12.1 Running it
+
+- `npm run serve` builds the server and the dashboard, then serves the
+  dashboard at `http://127.0.0.1:3000/dashboard/`. The page and the API share
+  an origin, so CORS is not needed.
+- `npm run dashboard:dev` starts Vite's dev server with hot reload. It proxies
+  the API routes to a server already running on port 3000.
+- `npm run build:web` builds `dist-web/` only.
+
+The server serves `index.html` and the flat files under `assets/`. File names
+must match a safe character set, so no path can leave the directory. Every
+dashboard response carries a strict Content Security Policy (`default-src
+'self'`, no inline scripts or styles, `frame-ancestors 'none'`). Assets are
+cached as immutable, and the page itself is not cached.
+
+### 12.2 Views
+
+| View | Source | Shows |
+| ---- | ------ | ----- |
+| Session list and create form | `SessionList`, `CreateSessionForm` | World, provider, status, turns, and experiments used. New sessions take a world, budget, turn limit, and an optional private noise seed. |
+| Session detail | `SessionDetail` | Status, counters, "Step one turn", and "Run to end" (32 turns per request). |
+| Experiment timeline | `ExperimentTimeline` | An SVG mark per experiment in run order: two lanes for a boolean outcome, a line for a numeric one. Below it is a table of every input and outcome. |
+| Measurements | `MeasurementList` | Each `evaluate_measurement` call from the transcript, whether it was valid, and the range of its values |
+| Theory | `SessionDetail`, `TheoryTable` | The submitted theory in readable form, every submission attempt with its result, and a table of all sessions' theories |
+| Score charts | `ScoreChart` | Bars for in-range and out-of-range accuracy (or within-tolerance rate on numeric worlds), each with its pass threshold, plus RMSE for numeric worlds |
+
+Charts are plain SVG, so there is no chart library.
+
+### 12.3 Information hiding
+
+Without the operator token the dashboard reads only investigation routes. It
+shows no scores, score columns, or evaluate button. The operator types the
+token into a password field. It is held in React state only, never in
+storage or cookies, and is dropped if the server rejects it. With the token,
+the dashboard loads stored evaluations, can evaluate a submitted theory, and
+shows scores in the theory table and score charts. "Hide scores" forgets the
+token.
+
+The dashboard imports server code as types only, so no server code reaches
+the bundle. A test enforces this, and also rejects `localStorage`,
+`sessionStorage`, cookies, `dangerouslySetInnerHTML`, and `eval` in dashboard
+code.
+
+### 12.4 Tests
+
+- `web/tests/components.test.tsx` (jsdom) renders each key view with fixed
+  data. It covers selection and deletion, form validation, timeline marks for
+  both outcome kinds, theory rows with and without scores, chart bars and
+  thresholds, transcript parsing, and empty states.
+- `web/tests/app.test.tsx` renders the whole app against a real API server
+  on a random port. It creates and runs sessions, checks that no scores or
+  noise seed appear without the token, then enters the token, evaluates, and
+  reads the charts. It also covers hiding scores, a rejected token, deleting
+  a session, and an unreachable API.
+- `tests/api-dashboard.test.ts` covers dashboard hosting: the redirect, the
+  security policy, asset types, path traversal attempts, allowed methods,
+  and the server without a dashboard.

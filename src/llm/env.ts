@@ -7,7 +7,7 @@
  */
 import { readFileSync } from "node:fs";
 
-const PROJECT_ENV_KEYS = ["GEMINI_API_KEY", "GEMINI_MODEL", "XENO_OPERATOR_TOKEN"] as const;
+const PROJECT_ENV_KEYS = ["GEMINI_API_KEY", "GEMINI_MODEL", "XENO_OPERATOR_TOKEN", "XENO_MONGODB_URI", "XENO_MONGODB_DB"] as const;
 
 export function loadProjectEnv(filePath = ".env", env: NodeJS.ProcessEnv = process.env): void {
   let text: string;

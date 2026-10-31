@@ -73,6 +73,13 @@ export interface DiscoveryAgentOptions {
   random?: () => number;
 }
 
+/** A stored conversation to continue. Only runs that can still take turns are resumed. */
+export interface DiscoveryResumeState {
+  transcript: readonly TranscriptEntry[];
+  messages: readonly LlmMessage[];
+  modelTurns: number;
+}
+
 export interface DiscoveryAgentResult {
   status: DiscoveryStatus;
   transcript: TranscriptEntry[];
@@ -95,6 +102,8 @@ export interface DiscoveryRun {
   status(): DiscoveryStatus | null;
   /** A fresh copy of the current state. */
   snapshot(): DiscoveryRunSnapshot;
+  /** A fresh copy of the provider conversation, for storage and resuming. */
+  messages(): LlmMessage[];
 }
 
 export async function runDiscoveryAgent(options: DiscoveryAgentOptions): Promise<DiscoveryAgentResult> {
@@ -106,7 +115,7 @@ export async function runDiscoveryAgent(options: DiscoveryAgentOptions): Promise
   return { ...result, status: result.status! };
 }
 
-export function createDiscoveryRun(options: DiscoveryAgentOptions): DiscoveryRun {
+export function createDiscoveryRun(options: DiscoveryAgentOptions, resume?: DiscoveryResumeState): DiscoveryRun {
   const maxModelTurns = options.maxModelTurns ?? DEFAULT_MAX_MODEL_TURNS;
   const timeoutMs = options.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS;
   const maxRetries = options.maxRetries ?? DEFAULT_PROVIDER_RETRIES;
@@ -126,9 +135,18 @@ export function createDiscoveryRun(options: DiscoveryAgentOptions): DiscoveryRun
   const random = options.random ?? Math.random;
   let modelTurns = 0;
 
-  pushTranscript(transcript, { type: "system_prompt", text: prompt.systemInstruction }, secrets);
-  pushTranscript(transcript, { type: "user_message", text: prompt.userMessage }, secrets);
-  messages.push({ role: "user", text: prompt.userMessage });
+  if (resume === undefined) {
+    pushTranscript(transcript, { type: "system_prompt", text: prompt.systemInstruction }, secrets);
+    pushTranscript(transcript, { type: "user_message", text: prompt.userMessage }, secrets);
+    messages.push({ role: "user", text: prompt.userMessage });
+  } else {
+    if (!Number.isInteger(resume.modelTurns) || resume.modelTurns < 0 || resume.modelTurns >= maxModelTurns) {
+      throw new Error("Only a run with turns left can be resumed.");
+    }
+    transcript.push(...structuredClone(resume.transcript));
+    messages.push(...structuredClone(resume.messages));
+    modelTurns = resume.modelTurns;
+  }
 
   let status: DiscoveryStatus | null = null;
   let submitted: CompletionStep = NO_THEORY;
@@ -190,6 +208,9 @@ export function createDiscoveryRun(options: DiscoveryAgentOptions): DiscoveryRun
         modelTurns,
         providerDiagnostic: providerDiagnostic === null ? null : copyDiagnostic(providerDiagnostic),
       };
+    },
+    messages() {
+      return structuredClone(messages);
     },
   };
 }

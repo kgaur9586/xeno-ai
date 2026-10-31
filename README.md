@@ -24,7 +24,8 @@ XENO validates and interprets itself. Generated code is never executed.
 | 6 | Richer worlds: noise, numeric outcomes, more distractors, two new worlds | Done; the agent and baselines run on every world |
 | 7 | Transfer to altered worlds | Done, on hand-built source theories |
 | 8 | Backend HTTP API | Done; sessions are kept in memory |
-| 9 to 11 | Dashboard, MongoDB, multiple agents | Not started |
+| 9 | React dashboard | Done |
+| 10 to 11 | MongoDB, multiple agents | Not started |
 
 The full plan is in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md).
 
@@ -81,7 +82,8 @@ set.
 | `npm run discover` | Runs one discovery session with the dummy provider. |
 | `npm run discover -- --live` | Runs one session against Gemini. Requires both `.env` values. |
 | `npm run transfer` | Runs the hand-built transfer cases: does a theory still pass after the world is altered, and how many experiments does adapting it take? |
-| `npm run serve` | Starts the HTTP API on `http://127.0.0.1:3000`. Add `-- --port <n>` to change the port, or `-- --live` to offer Gemini. |
+| `npm run serve` | Builds everything and starts the HTTP API on `http://127.0.0.1:3000`, with the dashboard at `/dashboard/`. Add `-- --port <n>` to change the port, or `-- --live` to offer Gemini. |
+| `npm run dashboard:dev` | Dashboard dev server with hot reload. It proxies API calls to a server running on port 3000. |
 
 `discover` accepts these options:
 
@@ -137,6 +139,21 @@ Every route, request field, and error code is listed in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), section 11. Sessions are kept
 in memory and are lost when the server stops.
 
+## Dashboard
+
+Run `npm run serve` and open
+[http://127.0.0.1:3000/dashboard/](http://127.0.0.1:3000/dashboard/). From
+there you can:
+
+- create a session for any world and run it one turn at a time or to the end
+- follow each experiment on the timeline
+- see the measurements the agent defined and every theory it submitted
+
+Held-out scores stay hidden until you enter the operator token
+(`XENO_OPERATOR_TOKEN`) in the top bar. The dashboard then adds an
+"Evaluate theory" button, score columns in the theory table, and score charts
+with pass thresholds. The token is kept in memory only.
+
 ## Reading the results
 
 - **Dummy results are not model results.** Every dummy run is labeled as such
@@ -170,6 +187,7 @@ src/
   api/         HTTP API: request schemas, in-memory sessions, routes
   shared/      seeded random number generator
   cli/         entry points for the npm commands
+web/           React dashboard (Vite): components, API client, component tests
 tests/         Vitest suite
 docs/          project plan and architecture
 ```
@@ -180,7 +198,8 @@ docs/          project plan and architecture
   exit criteria.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): components,   information
   hiding, the Glow World design, benchmark limits, the Phase 5 agent, the
-  Phase 6 worlds, Phase 7 transfer, and the Phase 8 API.
+  Phase 6 worlds, Phase 7 transfer, the Phase 8 API, and the Phase 9
+  dashboard.
 
 These documents describe the hidden rule. They are never placed in an agent's
 context.
