@@ -1,12 +1,24 @@
 /**
  * Scripted stand-in used when no live model is called.
  *
- * It runs the public minimum, midpoint, and maximum grid, then submits the
- * theory chosen by the observation catalog. It does not open a network connection.
+ * It explores with the public minimum, midpoint, and maximum grid when that
+ * grid has at most 27 points (three attributes), and otherwise with a
+ * fixed-seed random design inside the public ranges. It then submits the
+ * catalog theory that best fits its observations: a boolean theory for a
+ * boolean outcome, a numeric theory for a numeric one. It does not open a
+ * network connection.
  */
-import { fitTheoryFromObservations, readObservedRow, type ObservedRow, type PublicRanges } from "../agents/observation-theorist.js";
+import {
+  fitNumericTheoryFromObservations,
+  fitTheoryFromObservations,
+  readObservedRow,
+  type ObservedRow,
+  type PublicRanges,
+} from "../agents/observation-theorist.js";
 import { planGrid } from "../agents/systematic-explorer.js";
 import { RUN_EXPERIMENT_TOOL, SUBMIT_THEORY_TOOL } from "../agents/discovery-tool-declarations.js";
+import { createSeededRandom } from "../shared/random.js";
+import type { AnyWorldDescription } from "../tools/public-types.js";
 import type {
   LlmCompletionRequest,
   LlmCompletionResult,
@@ -14,9 +26,12 @@ import type {
   LlmProvider,
   LlmToolCall,
 } from "./provider.js";
-import type { PublicDescription } from "../tools/schemas.js";
 
 export const DUMMY_PROVIDER_NAME = "dummy";
+/** Largest grid the dummy runs; larger worlds use the random design. */
+export const DUMMY_MAX_GRID_POINTS = 27;
+/** Differs from the random explorer's seed so the two designs are independent. */
+export const DUMMY_DESIGN_SEED = 7;
 
 const DESCRIPTION_MARKER = "Public world description:\n";
 
@@ -42,26 +57,50 @@ function nextCompletion(request: LlmCompletionRequest): LlmCompletionResult {
     return { kind: "tool_calls", calls: experiments };
   }
 
-  const ranges = description === null ? emptyRanges() : rangesOf(description);
-  const fitted = fitTheoryFromObservations(ranges, observations);
+  const ranges = description === null ? { a: { min: Number.NaN, max: Number.NaN } } : rangesOf(description);
   return {
     kind: "tool_calls",
-    calls: [
-      {
-        id: "dummy-theory",
-        name: SUBMIT_THEORY_TOOL,
-        arguments: {
-          measurement: structuredClone(fitted.theory.measurement),
-          operator: fitted.theory.operator,
-          threshold: fitted.theory.threshold,
-        },
-      },
-    ],
+    calls: [{ id: "dummy-theory", name: SUBMIT_THEORY_TOOL, arguments: chooseTheory(description, ranges, observations) }],
   };
 }
 
-function remainingExperiments(description: PublicDescription, completed: number): LlmToolCall[] {
-  const planned = planGrid(description);
+function chooseTheory(
+  description: AnyWorldDescription | null,
+  ranges: PublicRanges,
+  observations: readonly ObservedRow[],
+): Record<string, unknown> {
+  const numeric = description !== null && Object.values(description.outcome)[0] === "number";
+  if (numeric) {
+    const fitted = fitNumericTheoryFromObservations(ranges, observations);
+    return { measurement: structuredClone(fitted.theory.measurement) };
+  }
+  const fitted = fitTheoryFromObservations(ranges, observations);
+  return {
+    measurement: structuredClone(fitted.theory.measurement),
+    operator: fitted.theory.operator,
+    threshold: fitted.theory.threshold,
+  };
+}
+
+/** The full planned design, in run order. */
+export function dummyDesign(description: AnyWorldDescription): Array<Record<string, number>> {
+  const names = Object.keys(description.attributes);
+  if (3 ** names.length <= DUMMY_MAX_GRID_POINTS) {
+    return planGrid(description);
+  }
+  const random = createSeededRandom(DUMMY_DESIGN_SEED);
+  return Array.from({ length: description.experimentBudget }, () => {
+    const point: Record<string, number> = {};
+    for (const name of names) {
+      const range = description.attributes[name]!;
+      point[name] = range.min + random() * (range.max - range.min);
+    }
+    return point;
+  });
+}
+
+function remainingExperiments(description: AnyWorldDescription, completed: number): LlmToolCall[] {
+  const planned = dummyDesign(description);
   const remainingBudget = description.experimentBudget - completed;
   if (remainingBudget < 1 || completed >= planned.length) {
     return [];
@@ -76,7 +115,7 @@ function remainingExperiments(description: PublicDescription, completed: number)
     calls.push({
       id: `dummy-exp-${completed + offset + 1}`,
       name: RUN_EXPERIMENT_TOOL,
-      arguments: { a: inputs.a, b: inputs.b, c: inputs.c },
+      arguments: { ...inputs },
     });
   }
   return calls;
@@ -101,7 +140,7 @@ function readObservations(messages: readonly LlmMessage[]): ObservedRow[] {
   return rows;
 }
 
-function readPublicDescription(systemInstruction: string): PublicDescription | null {
+function readPublicDescription(systemInstruction: string): AnyWorldDescription | null {
   const start = systemInstruction.indexOf(DESCRIPTION_MARKER);
   if (start < 0) {
     return null;
@@ -118,32 +157,39 @@ function readPublicDescription(systemInstruction: string): PublicDescription | n
   }
 }
 
-function parsePublicDescription(value: unknown): PublicDescription | null {
+function parsePublicDescription(value: unknown): AnyWorldDescription | null {
   if (typeof value !== "object" || value === null) {
     return null;
   }
   const record = value as Record<string, unknown>;
-  if (record.worldId !== "glow-world" || !isPositiveInteger(record.experimentBudget)) {
+  if (typeof record.worldId !== "string" || !isPositiveInteger(record.experimentBudget)) {
     return null;
   }
   if (typeof record.attributes !== "object" || record.attributes === null) {
     return null;
   }
-  const attributes = record.attributes as Record<string, unknown>;
-  const a = readBounds(attributes.a);
-  const b = readBounds(attributes.b);
-  const c = readBounds(attributes.c);
-  if (a === null || b === null || c === null) {
+  const attributes: Record<string, { min: number; max: number }> = {};
+  for (const [name, bounds] of Object.entries(record.attributes as Record<string, unknown>)) {
+    const parsed = readBounds(bounds);
+    if (parsed === null) {
+      return null;
+    }
+    attributes[name] = parsed;
+  }
+  if (Object.keys(attributes).length === 0) {
     return null;
   }
-  const outcome = record.outcome;
-  if (typeof outcome !== "object" || outcome === null || (outcome as Record<string, unknown>).glows !== "boolean") {
+  if (typeof record.outcome !== "object" || record.outcome === null) {
+    return null;
+  }
+  const outcomes = Object.entries(record.outcome as Record<string, unknown>);
+  if (outcomes.length !== 1 || (outcomes[0]![1] !== "boolean" && outcomes[0]![1] !== "number")) {
     return null;
   }
   return {
-    worldId: "glow-world",
-    attributes: { a, b, c },
-    outcome: { glows: "boolean" },
+    worldId: record.worldId,
+    attributes,
+    outcome: { [outcomes[0]![0]]: outcomes[0]![1] },
     experimentBudget: record.experimentBudget,
   };
 }
@@ -162,20 +208,12 @@ function readBounds(value: unknown): { min: number; max: number } | null {
   return { min: record.min, max: record.max };
 }
 
-function rangesOf(description: PublicDescription): PublicRanges {
-  return {
-    a: { min: description.attributes.a.min, max: description.attributes.a.max },
-    b: { min: description.attributes.b.min, max: description.attributes.b.max },
-    c: { min: description.attributes.c.min, max: description.attributes.c.max },
-  };
-}
-
-function emptyRanges(): PublicRanges {
-  return {
-    a: { min: Number.NaN, max: Number.NaN },
-    b: { min: Number.NaN, max: Number.NaN },
-    c: { min: Number.NaN, max: Number.NaN },
-  };
+function rangesOf(description: AnyWorldDescription): PublicRanges {
+  const ranges: Record<string, { min: number; max: number }> = {};
+  for (const [name, bounds] of Object.entries(description.attributes)) {
+    ranges[name] = { min: bounds.min, max: bounds.max };
+  }
+  return ranges;
 }
 
 function isPositiveInteger(value: unknown): value is number {

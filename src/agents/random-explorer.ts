@@ -21,14 +21,14 @@ export function createRandomExplorer(options: RandomExplorerOptions): Experiment
     run({ description, tools }) {
       // A fresh generator per run, so running the same explorer twice repeats its choices.
       const random = createSeededRandom(seed);
-      const { a, b, c } = description.attributes;
+      const names = Object.keys(description.attributes);
 
       while (tools.getRemainingBudget() > 0) {
-        const result = tools.runExperiment({
-          a: drawWithin(random, a),
-          b: drawWithin(random, b),
-          c: drawWithin(random, c),
-        });
+        const request: Record<string, number> = {};
+        for (const name of names) {
+          request[name] = drawWithin(random, description.attributes[name]!);
+        }
+        const result = tools.runExperiment(request);
         // Stop on any refusal instead of retrying, so a misbehaving tool cannot cause an endless loop.
         if (!result.ok) {
           return;

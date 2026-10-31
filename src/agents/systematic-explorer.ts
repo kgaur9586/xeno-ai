@@ -6,7 +6,7 @@
  * experiments). The explorer stops when the grid is complete or the budget
  * runs out, whichever comes first.
  */
-import type { ExperimentInput, PublicDescription } from "../tools/schemas.js";
+import type { AnyWorldDescription } from "../tools/public-types.js";
 import type { AttributeRange, Experimenter } from "./experimenter.js";
 
 export const DEFAULT_LEVELS_PER_ATTRIBUTE = 3;
@@ -15,26 +15,31 @@ export interface SystematicExplorerOptions {
   levelsPerAttribute?: number;
 }
 
-/** Lists the grid in run order: `a` changes slowest, `c` fastest. */
-export function planGrid(
-  description: PublicDescription,
-  levelsPerAttribute: number = DEFAULT_LEVELS_PER_ATTRIBUTE,
-): ExperimentInput[] {
-  assertValidLevelCount(levelsPerAttribute);
-  const { a, b, c } = description.attributes;
-  const aLevels = evenlySpacedLevels(a, levelsPerAttribute);
-  const bLevels = evenlySpacedLevels(b, levelsPerAttribute);
-  const cLevels = evenlySpacedLevels(c, levelsPerAttribute);
+export type GridPoint<D extends AnyWorldDescription> = Record<keyof D["attributes"] & string, number>;
 
-  const plan: ExperimentInput[] = [];
-  for (const aValue of aLevels) {
-    for (const bValue of bLevels) {
-      for (const cValue of cLevels) {
-        plan.push({ a: aValue, b: bValue, c: cValue });
+/**
+ * Lists the grid in run order: the first attribute changes slowest, the last
+ * fastest (for Glow World, `a` slowest and `c` fastest).
+ */
+export function planGrid<D extends AnyWorldDescription>(
+  description: D,
+  levelsPerAttribute: number = DEFAULT_LEVELS_PER_ATTRIBUTE,
+): GridPoint<D>[] {
+  assertValidLevelCount(levelsPerAttribute);
+  const names = Object.keys(description.attributes);
+  const levels = names.map((name) => evenlySpacedLevels(description.attributes[name]!, levelsPerAttribute));
+
+  let plan: Array<Record<string, number>> = [{}];
+  for (let index = 0; index < names.length; index++) {
+    const next: Array<Record<string, number>> = [];
+    for (const partial of plan) {
+      for (const value of levels[index]!) {
+        next.push({ ...partial, [names[index]!]: value });
       }
     }
+    plan = next;
   }
-  return plan;
+  return plan as GridPoint<D>[];
 }
 
 export function createSystematicExplorer(options: SystematicExplorerOptions = {}): Experimenter {

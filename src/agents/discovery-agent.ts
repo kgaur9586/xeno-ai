@@ -5,6 +5,7 @@
  * a valid theory, the model-turn limit, or a provider failure. It does not
  * score the theory and it does not execute generated JavaScript.
  */
+import type { ValidatedNumericTheory } from "../language/numeric-theory.js";
 import type { ValidatedTheory } from "../language/theory.js";
 import {
   classifyProviderError,
@@ -19,10 +20,11 @@ import {
   type LlmProvider,
   type ProviderErrorDiagnostic,
 } from "../llm/provider.js";
-import type { ExperimentTools } from "../tools/experiment-tools.js";
+import type { AnyExperimentTools } from "../tools/public-types.js";
 import { buildDiscoveryPrompt } from "./discovery-prompt.js";
-import { DISCOVERY_TOOL_DECLARATIONS } from "./discovery-tool-declarations.js";
+import { buildDiscoveryToolDeclarations } from "./discovery-tool-declarations.js";
 import { executeDiscoveryTool, notExecutedResult } from "./discovery-tools.js";
+import { discoveryShapeOf } from "./discovery-world.js";
 
 export const DEFAULT_MAX_MODEL_TURNS = 16;
 export const DEFAULT_PROVIDER_TIMEOUT_MS = 60_000;
@@ -52,12 +54,13 @@ export type TranscriptEntry =
     }
   | {
       type: "submitted_theory";
-      theory: { measurement: unknown; operator: string; threshold: number };
+      /** `operator` and `threshold` are present for a boolean theory only. */
+      theory: { measurement: unknown; operator?: string; threshold?: number };
     };
 
 export interface DiscoveryAgentOptions {
   provider: LlmProvider;
-  tools: ExperimentTools;
+  tools: AnyExperimentTools;
   maxModelTurns?: number;
   timeoutMs?: number;
   /** Extra attempts after the first provider failure. Zero means one attempt. */
@@ -73,7 +76,10 @@ export interface DiscoveryAgentOptions {
 export interface DiscoveryAgentResult {
   status: DiscoveryStatus;
   transcript: TranscriptEntry[];
+  /** A boolean theory, for a world with a boolean outcome. */
   submittedTheory: ValidatedTheory | null;
+  /** A numeric theory, for a world with a numeric outcome. */
+  submittedNumericTheory: ValidatedNumericTheory | null;
   modelTurns: number;
   /** Safe failure facts for the operator. Null when the provider did not stop the run. */
   providerDiagnostic: ProviderErrorDiagnostic | null;
@@ -90,13 +96,14 @@ export async function runDiscoveryAgent(options: DiscoveryAgentOptions): Promise
     throw new Error("Provider retries must be a non-negative integer.");
   }
 
-  const prompt = buildDiscoveryPrompt(options.tools.describeWorld());
+  const description = options.tools.describeWorld();
+  const prompt = buildDiscoveryPrompt(description);
+  const declarations = buildDiscoveryToolDeclarations(discoveryShapeOf(description));
   const transcript: TranscriptEntry[] = [];
   const messages: LlmMessage[] = [];
   const sleep = options.sleep ?? delay;
   const random = options.random ?? Math.random;
   let modelTurns = 0;
-  let submittedTheory: ValidatedTheory | null = null;
 
   pushTranscript(transcript, { type: "system_prompt", text: prompt.systemInstruction }, secrets);
   pushTranscript(transcript, { type: "user_message", text: prompt.userMessage }, secrets);
@@ -108,7 +115,7 @@ export async function runDiscoveryAgent(options: DiscoveryAgentOptions): Promise
       {
         systemInstruction: prompt.systemInstruction,
         messages,
-        tools: DISCOVERY_TOOL_DECLARATIONS,
+        tools: declarations,
       },
       timeoutMs,
       maxRetries,
@@ -123,6 +130,7 @@ export async function runDiscoveryAgent(options: DiscoveryAgentOptions): Promise
         status: completion instanceof ProviderTimeoutError ? "timeout" : "provider_failure",
         transcript: copyTranscript(transcript),
         submittedTheory: null,
+        submittedNumericTheory: null,
         modelTurns,
         providerDiagnostic: copyDiagnostic(completion.diagnostic),
       };
@@ -130,12 +138,12 @@ export async function runDiscoveryAgent(options: DiscoveryAgentOptions): Promise
 
     modelTurns++;
     const step = applyCompletion(completion, options.tools, transcript, messages, secrets);
-    if (step.submittedTheory) {
-      submittedTheory = step.submittedTheory;
+    if (step.submittedTheory || step.submittedNumericTheory) {
       return {
         status: "theory_submitted",
         transcript: copyTranscript(transcript),
-        submittedTheory,
+        submittedTheory: step.submittedTheory,
+        submittedNumericTheory: step.submittedNumericTheory,
         modelTurns,
         providerDiagnostic: null,
       };
@@ -146,18 +154,26 @@ export async function runDiscoveryAgent(options: DiscoveryAgentOptions): Promise
     status: "turn_limit",
     transcript: copyTranscript(transcript),
     submittedTheory: null,
+    submittedNumericTheory: null,
     modelTurns,
     providerDiagnostic: null,
   };
 }
 
+interface CompletionStep {
+  submittedTheory: ValidatedTheory | null;
+  submittedNumericTheory: ValidatedNumericTheory | null;
+}
+
+const NO_THEORY: CompletionStep = { submittedTheory: null, submittedNumericTheory: null };
+
 function applyCompletion(
   completion: LlmCompletionResult,
-  tools: ExperimentTools,
+  tools: AnyExperimentTools,
   transcript: TranscriptEntry[],
   messages: LlmMessage[],
   secrets: readonly string[],
-): { submittedTheory: ValidatedTheory | null } {
+): CompletionStep {
   if (completion.kind === "malformed") {
     pushTranscript(
       transcript,
@@ -169,14 +185,14 @@ function applyCompletion(
       secrets,
     );
     rememberUser(MODEL_FEEDBACK.MALFORMED_RESPONSE, transcript, messages, secrets);
-    return { submittedTheory: null };
+    return NO_THEORY;
   }
 
   if (completion.kind === "text") {
     pushTranscript(transcript, { type: "model_text", text: completion.text }, secrets);
     messages.push({ role: "model", text: redactValue(completion.text, secrets), echo: completion.echo });
     rememberUser(MODEL_FEEDBACK.TEXT_RESPONSE, transcript, messages, secrets);
-    return { submittedTheory: null };
+    return NO_THEORY;
   }
 
   if (completion.calls.length === 0) {
@@ -190,7 +206,7 @@ function applyCompletion(
       secrets,
     );
     rememberUser(MODEL_FEEDBACK.MALFORMED_RESPONSE, transcript, messages, secrets);
-    return { submittedTheory: null };
+    return NO_THEORY;
   }
 
   pushTranscript(
@@ -213,9 +229,10 @@ function applyCompletion(
 
   const results: Array<{ callId: string; name: string; output: Record<string, unknown> }> = [];
   let submittedTheory: ValidatedTheory | null = null;
+  let submittedNumericTheory: ValidatedNumericTheory | null = null;
 
   for (const call of completion.calls) {
-    if (submittedTheory) {
+    if (submittedTheory || submittedNumericTheory) {
       const output = notExecutedResult();
       results.push({ callId: call.id, name: call.name, output });
       pushTranscript(transcript, { type: "tool_result", callId: call.id, name: call.name, output }, secrets);
@@ -245,10 +262,18 @@ function applyCompletion(
         secrets,
       );
     }
+    if (executed.acceptedNumericTheory) {
+      submittedNumericTheory = executed.acceptedNumericTheory;
+      pushTranscript(
+        transcript,
+        { type: "submitted_theory", theory: { measurement: executed.acceptedNumericTheory.measurement } },
+        secrets,
+      );
+    }
   }
 
   messages.push({ role: "tool", results });
-  return { submittedTheory };
+  return { submittedTheory, submittedNumericTheory };
 }
 
 async function requestCompletion(

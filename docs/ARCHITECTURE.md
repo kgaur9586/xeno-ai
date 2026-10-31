@@ -487,7 +487,14 @@ Dependencies: `zod` (runtime) plus `typescript` and `vitest` (development
 only). Phase 2 adds `@types/node` (development only, type definitions with
 no runtime code) so tests can read source files for the import check.
 
-Phase 5 adds the files in section 8. Later phases add these contents as they are needed, not before:
+Phase 5 adds the files in section 8. Phase 6 adds `src/worlds/world.ts`,
+`ring-world.ts`, `drift-world.ts`, `registry.ts`, `src/tools/world-schemas.ts`,
+`world-tools.ts`, `src/language/numeric-theory.ts`, and
+`src/evaluator/world-evaluator.ts` (section 9). Running the agent on every
+world adds `src/tools/public-types.ts`, `src/agents/discovery-world.ts`, and
+`src/agents/world-comparison.ts` (section 9.6). Phase 7 adds
+`src/worlds/variants.ts`, `src/transfer/refit.ts`, `transfer.ts`,
+`scenarios.ts`, and `src/cli/transfer.ts` (section 10). Later phases add these contents as they are needed, not before:
 
 | Location        | Phase | Contents                             |
 | --------------- | ----- | ------------------------------------ |
@@ -583,3 +590,245 @@ midpoint.
 
 Phase 5 adds `@google/genai` so the live adapter can call Gemini. Tests never
 construct a live request. The dummy provider does not import that package.
+
+---
+
+## 9. Phase 6 richer worlds
+
+Phase 6 adds a generic world contract and two new worlds. Glow World keeps its
+original API, so Phases 1 to 5 are unchanged. It is also wrapped as
+`GLOW_WORLD` so the generic tools and evaluator cover it too.
+
+### 9.1 World contract (`src/worlds/world.ts`)
+
+A world is a trusted, frozen object with:
+
+- `spec` (public): world id, ordered attribute names and ranges, outcome name,
+  outcome kind (`boolean` or `number`), and whether observations are noisy.
+- `trueOutcome(inputs)`: the noiseless rule.
+- `observe(inputs, random)`: one noisy observation. A boolean world uses one
+  random value per observation; a numeric world uses two (one Gaussian draw).
+  A noiseless world uses none.
+- Private noise level: `flipRate` (boolean) or `noiseStandardDeviation`
+  (numeric).
+- Private `extrapolation` profile: which attributes the evaluator pushes
+  outside their range, which it extends, and which stay in range.
+
+Only the generic tools and the evaluator receive world objects. A test checks
+that no file in `src/agents/` or `src/llm/` imports a world module.
+
+### 9.2 The worlds
+
+| World | Attributes (0 to 10) | Outcome | Hidden rule (private) | Noise (private) |
+| ----- | -------------------- | ------- | --------------------- | --------------- |
+| `glow-world` | `a`, `b`, `c` | `glows` boolean | `(a - 5) * (b - 5) < 0` | none |
+| `ring-world` | `p`, `q`, `r`, `s` | `lit` boolean | `(p - 10)^2 + (q - 5)^2 < 25` | each observation flips with probability 0.05 |
+| `drift-world` | `u`, `v`, `w`, `x`, `y` | `level` number | `2u - 3v + 10` | additive Gaussian, standard deviation 0.5 |
+
+`c`, `r`, `s`, `w`, `x`, and `y` are distractors. Ring World's circle extends
+past `p = 10`, so out-of-range cases still contain both classes. Drift World's
+rule is linear, so a correct theory keeps working out of range.
+
+### 9.3 Generic experiment tools (`src/tools/world-tools.ts`)
+
+`createWorldTools(world, { budget, noiseSeed })` follows the same contract
+as the Glow World tools: strict Zod input built from the public ranges, a
+budget, an ordered log, fresh copies with exactly the documented fields, and
+the same fixed `INVALID_INPUT` and `BUDGET_EXHAUSTED` errors. The public
+description is:
+
+```json
+{
+  "worldId": "ring-world",
+  "attributes": { "p": { "min": 0, "max": 10 }, "q": { "min": 0, "max": 10 }, "r": { "min": 0, "max": 10 }, "s": { "min": 0, "max": 10 } },
+  "outcome": { "lit": "boolean" },
+  "observationNoise": "present",
+  "experimentBudget": 30
+}
+```
+
+`observationNoise` says only whether noise exists, not how much. Noise comes
+from a private seeded stream. A rejected request uses no budget and draws no
+noise, so the same seed and the same accepted requests reproduce the same
+observations. Repeating one input in a noisy world gives different readings.
+
+### 9.4 Language and numeric theories
+
+The expression language now takes a variable set. `createVariableSet(names)`
+accepts 1 to 16 unique short lowercase names. Every validator and the
+interpreter default to Glow World's `a`, `b`, `c`, so existing callers are
+unchanged. A theory naming another world's attributes is rejected.
+
+A numeric theory is a strict object with one field, `measurement`. Its value
+is the prediction. It uses the same validator and interpreter as boolean
+theories.
+
+### 9.5 Noise-aware evaluator (`src/evaluator/world-evaluator.ts`)
+
+Held-out cases come from a private seed and the world engine directly. Their
+labels carry the same noise an observation would, so on a noisy world even
+the true theory cannot score 100%.
+
+- **Boolean worlds:** the noiseless classes are exactly balanced, then label
+  noise is applied. The report gives a noise ceiling of `1 - flipRate`. A
+  dataset passes when accuracy is at least
+  `1 - flipRate - 3 * sqrt(e * (1 - e) / n)`, where `e` is the flip rate with
+  a floor of 0.005 and `n` is the case count. Ring World at 200 cases needs
+  about 0.904. Glow World needs about 0.985.
+- **Numeric worlds:** the report gives mean absolute error, root mean squared
+  error, and the share of predictions within three noise standard deviations
+  (1.5 for Drift World). A dataset passes when that share is at least
+  `0.9973 - 3 * sqrt(0.9973 * 0.0027 / n)`, about 0.986 at 200 cases.
+- **Out-of-range cases:** profiled `outside` attributes are drawn at least
+  one-tenth of a range-width beyond the range, up to one range-width plus that
+  gap. Profiled `extended` attributes are drawn from one range-width beyond
+  each side. All others stay in range.
+
+Reports contain aggregate metrics, pass thresholds, the noise level, and
+complexity. They contain no cases, labels, or seeds. Measured at 200 cases,
+the true Ring World theory scores about 0.955 in range and passes. A
+single-attribute theory on `p` scores about 0.895 and fails. Distractor and
+constant theories score near 0.5. Drift World's true theory has an RMSE close
+to 0.5 and passes. A coefficient off by 0.1 fails, and a range-clamped copy of
+the true rule passes in range and fails out of range.
+
+### 9.6 The agent and baselines on every world
+
+The discovery agent, its prompt, its tool declarations, the dummy provider,
+the observation catalog, and both Phase 2 explorers now work on any world.
+They depend only on the type-only shapes in `src/tools/public-types.ts`, which
+both the Glow World tools and the generic tools satisfy. No agent file imports
+a world.
+
+- **Prompt and tools.** The prompt says whether the outcome is boolean or
+  numeric. On a noisy world it adds one sentence: "Observations are
+  imprecise: repeating an experiment can give a different result." It never
+  states how much noise there is. On a numeric world `submit_theory` takes
+  only `measurement`. Glow World's prompt and declarations are unchanged.
+- **Session.** `runDiscoverySession` takes `worldId` (default `glow-world`)
+  and a private `noiseSeed`. Glow World without a noise seed still uses the
+  original tools. Every world gets a noise-aware `worldEvaluation`. The
+  Phase 4 `evaluation` and `theoryId` stay Glow-only.
+- **Dummy provider.** It runs the min/mid/max grid when that has at most 27
+  points, and otherwise a fixed-seed random design (seed 7, different from
+  the random explorer's 42). It then submits the boolean catalog theory or,
+  for a numeric outcome, the lowest-error candidate among the mean, one
+  least-squares line per attribute, and a full least-squares fit.
+- **Comparison.** `runWorldComparison` runs the dummy agent and both
+  baselines on fresh tools for the same world, budget, and noise seed. It then
+  scores every theory with the noise-aware evaluator.
+
+`npm run compare -- --world <id> [--noise-seed <n>]` and
+`npm run discover -- --world <id> [--noise-seed <n>]` select the world.
+Without `--world`, both commands behave as in Phase 5.
+
+At budget 27 with the default seeds:
+
+- **Glow World:** everything scores perfectly, because of the midpoint
+  coincidence in section 7.
+- **Ring World:** every strategy fails, because the catalog has no circle.
+  The dummy's best fit is a constant.
+- **Drift World:** both random designs recover roughly `2u - 3v + 10` by
+  least squares. The dummy's fit passes in range and out of range. The
+  random explorer's fit passes in range but fails out of range, because its
+  small spurious weights on the distractors grow there. Which one passes
+  depends on the design seed.
+- **Systematic explorer:** it is poor on four- and five-attribute worlds,
+  because 27 grid points vary only the last attributes.
+
+---
+
+## 10. Phase 7 transfer to altered worlds
+
+Phase 7 asks whether a theory found in one world still works after the world
+changes, and if not, how many new experiments it takes to adapt it.
+
+### 10.1 Variant worlds (`src/worlds/variants.ts`)
+
+`createVariantWorld(base, steps, variantId)` wraps a base world. The steps
+apply in order, and each one uses the variant's current attribute names:
+
+| Step | Effect |
+| ---- | ------ |
+| `shift` | The rule reacts to `attribute - offset`, so every boundary on it moves by `offset`. The public range does not change. |
+| `rescale` | The attribute is reported as `value * factor`. The public range scales with it. |
+| `rename` | The attribute gets a new public name, including in the extrapolation profile. |
+| `add-distractors` | New attributes that the outcome ignores. |
+| `change-rule` | The outcome follows a new rule, written as a theory in the restricted language, with the base world's noise level. |
+
+A variant is an ordinary world, so the generic tools and the evaluator work on
+it unchanged. Its id is supplied by the caller and must be opaque (the
+built-in cases use `transfer-target-1` and so on), because an agent shown the
+variant would see it. A test checks that no variant's public description
+names its transformation.
+
+### 10.2 Adapting a theory (`src/transfer/refit.ts`)
+
+Adapting keeps the theory's form. `refitTheory` may:
+
+1. Map the theory's variables onto the target's attribute names. All
+   one-to-one mappings are ranked by their fit before tuning. The identity
+   mapping (when it exists) and the two best other mappings are then tuned.
+2. Retune the numeric constants, and for a boolean theory the threshold.
+   - **Boolean theories:** a coordinate search on accuracy. The candidate
+     values are midpoints between observed values plus an even grid
+     reaching one range-width past the public ranges. Constants that start
+     equal can also move together. A tie keeps the current value.
+   - **Numeric theories:** damped Gauss-Newton (Levenberg-Marquardt) on the
+     squared error.
+
+It never adds, removes, or rearranges nodes, and it never changes the
+operator. A world whose rule changed form therefore cannot be adapted this
+way. The refit is pure: it reads only the theory, the public ranges, and the
+observations. A test checks that it imports only the language.
+
+### 10.3 Transfer metrics (`src/transfer/transfer.ts`)
+
+`runTransfer(source, target, theory, { evaluation, adaptation })` reports:
+
+- **Source:** the noise-aware report in the source world, and whether it passed.
+- **Unchanged:** the report for the same theory in the target. This is not
+  applicable (`UNKNOWN_ATTRIBUTE`) when the theory names attributes the target
+  lacks. It is also not applicable (`OUTCOME_KIND_MISMATCH`) when the theory
+  predicts the wrong kind of outcome. `transfersUnchanged` is true when it
+  passes both in range and out of range.
+- **Adaptation:** when the theory does not transfer unchanged, experiments
+  run in the target in seeded batches through the ordinary world tools. The
+  defaults are a batch size of 10, a limit of 200 experiments, noise seed 1,
+  and design seed 2026. After each batch the theory is refitted on every
+  observation so far and scored.
+- **`experimentsToAdapt`:** the number of target experiments after which the
+  refitted theory first passes both held-out sets. It is 0 when the theory
+  transfers unchanged, and null when no refit passed within the limit.
+
+The held-out evaluator only decides when to stop. The refit itself never sees
+held-out cases. Every report also lists the per-batch steps and the options
+used.
+
+### 10.4 Hand-built cases (`src/transfer/scenarios.ts`, `npm run transfer`)
+
+Each case uses the hand-written true theory of its base world as the source
+theory. These are not agent discoveries. With the CLI's evaluation seeds:
+
+| Case | Unchanged | Experiments to adapt |
+| ---- | --------- | -------------------- |
+| Glow World, two distractors added | passes | 0 |
+| Glow World, threshold on `a` shifted by +2 | fails | 80 |
+| Glow World, `a` rescaled by 2 | fails | 120 |
+| Glow World, all attributes renamed | not applicable | 10 |
+| Glow World, rule changed to `a > b` | fails | none within 200 |
+| Ring World, centre moved along `q` by +2 | fails | 50 |
+| Drift World, `u` shifted by +2 | fails | 10 |
+| Drift World, rule changed to `u * v / 2` | fails | none within 200 |
+
+The tests check each case's expected outcome with different evaluation seeds.
+They also check that `experimentsToAdapt` is a whole number of batches, that
+only the last step passes, that a failed adaptation used the full limit, and
+that the report is reproducible.
+
+### 10.5 Limits
+
+The adaptation design is random within the public ranges. It is not chosen
+by an agent, so `experimentsToAdapt` measures the theory and the refit, not
+an agent's experimental skill. Ring World cannot be adapted to a rescaled
+attribute, because the circle would need a new scale factor in its form.

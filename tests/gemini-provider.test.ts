@@ -511,7 +511,15 @@ describe("discover command arguments", () => {
       outOfRangeSeed: 2,
       caseCount: 200,
       live: false,
+      worldId: "glow-world",
+      noiseSeed: undefined,
     });
+    expect(parseDiscoverArgs(["--world", "drift-world", "--noise-seed", "7"])).toMatchObject({
+      worldId: "drift-world",
+      noiseSeed: 7,
+    });
+    expect(() => parseDiscoverArgs(["--world", "no-such-world"])).toThrow(DiscoverArgumentsError);
+    expect(() => parseDiscoverArgs(["--world"])).toThrow(DiscoverArgumentsError);
     expect(parseDiscoverArgs(["--live"]).live).toBe(true);
     expect(() => parseDiscoverArgs(["--live", "--live"])).toThrow(DiscoverArgumentsError);
     expect(parseDiscoverArgs(["--budget", "4", "--retries", "0", "--case-count", "20"])).toMatchObject({

@@ -218,6 +218,14 @@ midpoint coincides with the private threshold; see `ARCHITECTURE.md` section 7.
 - Each world has its own determinism, rule, isolation, and evaluator tests.
 - The evaluator's thresholds account for noise.
 
+**Status:** Done. Ring World (boolean, curved boundary, 5% label flips, two
+distractors) and Drift World (numeric, linear rule, Gaussian noise, three
+distractors) join Glow World behind one world contract. Generic experiment
+tools, numeric theories, and a noise-aware evaluator cover all three. See
+`ARCHITECTURE.md` section 9. The Phase 5 discovery agent, the dummy
+provider, and the Phase 2 baselines now run on every world (`--world` on
+`discover` and `compare`; section 9.6).
+
 ---
 
 ## Phase 7 — Transfer to altered worlds
@@ -233,6 +241,14 @@ midpoint coincides with the private threshold; see `ARCHITECTURE.md` section 7.
 **Exit criteria**
 - Tests show transfer metrics computed correctly on hand-built cases
   (e.g. a theory that should transfer does; one that should not, does not).
+
+**Status:** Done. Variant worlds cover all five changes. Transfer reports
+give the source score, the unchanged score in the target (or why it does not
+apply), and the experiments needed to adapt the theory by remapping
+variables and retuning constants. Eight hand-built cases behave as intended:
+added distractors transfer unchanged, shifts, rescaling, and renaming adapt,
+and changed rules do not adapt within 200 experiments. See
+`ARCHITECTURE.md` section 10 and `npm run transfer`.
 
 ---
 

@@ -4,13 +4,13 @@
  * An experimenter sees only what a real agent may see: the public world
  * description and the agent-facing experiment tools. It never receives the
  * world engine, the hidden rule, or anything belonging to the evaluator.
+ * The contract works for any world, not only Glow World.
  */
-import type { ExperimentTools } from "../tools/experiment-tools.js";
-import type { PublicDescription } from "../tools/schemas.js";
+import type { AnyExperimentTools, AnyWorldDescription, PublicAttributeRange } from "../tools/public-types.js";
 
 export interface ExperimenterContext {
-  readonly description: PublicDescription;
-  readonly tools: ExperimentTools;
+  readonly description: AnyWorldDescription;
+  readonly tools: AnyExperimentTools;
 }
 
 export interface Experimenter {
@@ -19,4 +19,4 @@ export interface Experimenter {
   run(context: ExperimenterContext): void;
 }
 
-export type AttributeRange = PublicDescription["attributes"]["a"];
+export type AttributeRange = PublicAttributeRange;

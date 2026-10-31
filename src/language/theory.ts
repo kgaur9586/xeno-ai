@@ -5,7 +5,7 @@
  * second expression language or execute generated JavaScript.
  */
 import { z } from "zod";
-import type { Expression } from "./expression.js";
+import { DEFAULT_VARIABLE_SET, type Expression, type VariableSet } from "./expression.js";
 import { validateExpression } from "./validate.js";
 
 export const COMPARISON_OPERATORS = ["lt", "lte", "gt", "gte"] as const;
@@ -51,14 +51,17 @@ const validatedTheories = new WeakSet<object>();
  * A single fixed failure avoids echoing untrusted theory contents or detailed
  * parser information across a future agent boundary.
  */
-export function validateTheory(input: unknown): TheoryValidationResult {
+export function validateTheory(
+  input: unknown,
+  variables: VariableSet = DEFAULT_VARIABLE_SET,
+): TheoryValidationResult {
   try {
     const envelope = TheoryEnvelopeSchema.safeParse(input);
     if (!envelope.success) {
       return invalidTheory();
     }
 
-    const measurement = validateExpression(envelope.data.measurement);
+    const measurement = validateExpression(envelope.data.measurement, variables);
     if (!measurement.ok) {
       return invalidTheory();
     }
@@ -82,11 +85,14 @@ export function isValidatedTheory(input: unknown): input is ValidatedTheory {
 
 /** Counts expression AST nodes and its longest root-to-leaf path. */
 export function measureTheoryComplexity(theory: ValidatedTheory): TheoryComplexity {
+  return measureExpressionComplexity(theory.measurement);
+}
+
+/** The same count for any validated expression, e.g. a numeric theory's measurement. */
+export function measureExpressionComplexity(expression: Expression): TheoryComplexity {
   let nodeCount = 0;
   let depth = 0;
-  const pending: Array<{ node: Expression; depth: number }> = [
-    { node: theory.measurement, depth: 1 },
-  ];
+  const pending: Array<{ node: Expression; depth: number }> = [{ node: expression, depth: 1 }];
 
   while (pending.length > 0) {
     const current = pending.pop()!;
@@ -108,7 +114,7 @@ export function measureTheoryComplexity(theory: ValidatedTheory): TheoryComplexi
   return { nodeCount, depth };
 }
 
-function freezeExpression(expression: Expression): Expression {
+export function freezeExpression(expression: Expression): Expression {
   if ("op" in expression) {
     freezeExpression(expression.left);
     freezeExpression(expression.right);

@@ -5,6 +5,7 @@
  * must never be handed to the agent. The agent interacts with this world only
  * through the experiment tools in `src/tools/`.
  */
+import { uniformSpec, type BooleanWorld } from "./world.js";
 
 /** Public facts about the world. These are safe to show to the agent. */
 export const GLOW_WORLD_ID = "glow-world";
@@ -42,3 +43,27 @@ export function computeGlowOutcome(inputs: GlowInputs): GlowOutcome {
   const glows = (aAbove && bBelow) || (aBelow && bAbove);
   return { glows };
 }
+
+/** Glow World behind the generic world contract. It has no noise. */
+export const GLOW_WORLD: BooleanWorld = Object.freeze({
+  kind: "boolean",
+  spec: uniformSpec({
+    worldId: GLOW_WORLD_ID,
+    attributeNames: ["a", "b", "c"],
+    range: { min: ATTRIBUTE_MIN, max: ATTRIBUTE_MAX },
+    outcomeName: "glows",
+    outcomeKind: "boolean",
+    noisy: false,
+  }),
+  trueOutcome(inputs: Readonly<Record<string, number>>): boolean {
+    return computeGlowOutcome({ a: inputs.a!, b: inputs.b!, c: inputs.c! }).glows;
+  },
+  observe(inputs: Readonly<Record<string, number>>): boolean {
+    return computeGlowOutcome({ a: inputs.a!, b: inputs.b!, c: inputs.c! }).glows;
+  },
+  flipRate: 0,
+  extrapolation: Object.freeze({
+    outsideAttributes: Object.freeze(["a"]),
+    extendedAttributes: Object.freeze(["b"]),
+  }),
+});

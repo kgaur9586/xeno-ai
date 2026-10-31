@@ -14,7 +14,7 @@ const RANGES: PublicRanges = {
 };
 
 function row(a: number, b: number, c: number, glows: boolean): ObservedRow {
-  return { inputs: { a, b, c }, glows };
+  return { inputs: { a, b, c }, outcome: glows };
 }
 
 describe("Observation theorist", () => {

@@ -14,12 +14,13 @@
 import { languageFailure, type LanguageFailure } from "./errors.js";
 import {
   BINARY_OPERATORS,
+  DEFAULT_VARIABLE_SET,
   FUNCTION_NAMES,
   MAX_DEPTH,
   MAX_FUNCTION_ARGS,
   MAX_NODES,
   NODE_FIELDS,
-  VARIABLE_NAMES,
+  type VariableSet,
 } from "./expression.js";
 
 export type PreflightResult = { ok: true; snapshot: unknown } | LanguageFailure;
@@ -31,20 +32,19 @@ interface PendingValue {
 }
 
 const allowedFields: ReadonlySet<string> = new Set(NODE_FIELDS);
-const allowedVariables: ReadonlySet<string> = new Set(VARIABLE_NAMES);
 const allowedOperators: ReadonlySet<string> = new Set(BINARY_OPERATORS);
 const allowedFunctions: ReadonlySet<string> = new Set(FUNCTION_NAMES);
 
-export function preflightExpression(input: unknown): PreflightResult {
+export function preflightExpression(input: unknown, variables: VariableSet = DEFAULT_VARIABLE_SET): PreflightResult {
   try {
-    return snapshot(input);
+    return snapshot(input, new Set(variables.names));
   } catch {
     // e.g. a property getter or proxy trap that throws.
     return languageFailure("INVALID_EXPRESSION");
   }
 }
 
-function snapshot(input: unknown): PreflightResult {
+function snapshot(input: unknown, allowedVariables: ReadonlySet<string>): PreflightResult {
   let root: unknown;
   const pending: PendingValue[] = [{ value: input, depth: 1, place: (copy) => (root = copy) }];
   const seen = new WeakSet<object>();
@@ -99,7 +99,7 @@ function snapshot(input: unknown): PreflightResult {
           pending.push({ value: child[i], depth: depth + 1, place: (childCopy) => (argsCopy[i] = childCopy) });
         }
       } else {
-        const unknownName = checkName(field, child);
+        const unknownName = checkName(field, child, allowedVariables);
         if (unknownName) {
           return unknownName;
         }
@@ -112,7 +112,7 @@ function snapshot(input: unknown): PreflightResult {
 }
 
 /** Gives a specific error for an unknown name; other wrong types are left to the schema. */
-function checkName(field: string, value: unknown): LanguageFailure | null {
+function checkName(field: string, value: unknown, allowedVariables: ReadonlySet<string>): LanguageFailure | null {
   if (typeof value !== "string") {
     return null;
   }

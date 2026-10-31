@@ -15,6 +15,7 @@ import { loadProjectEnv, readGeminiConfig } from "../llm/env.js";
 import { createDummyProvider } from "../llm/dummy-provider.js";
 import { createGeminiProviderFromEnv } from "../llm/gemini-provider.js";
 import { PROVIDER_ERROR_MESSAGES, ProviderConfigError, type LlmProvider } from "../llm/provider.js";
+import { WORLD_IDS } from "../worlds/registry.js";
 
 export const DUMMY_SESSION_NOTICE =
   "DUMMY DATA: the scripted dummy provider ran this session. No live model was called.";
@@ -27,6 +28,7 @@ const INTEGER_OPTIONS = {
   "--in-range-seed": { fallback: 1, minimum: Number.MIN_SAFE_INTEGER },
   "--out-of-range-seed": { fallback: 2, minimum: Number.MIN_SAFE_INTEGER },
   "--case-count": { fallback: 200, minimum: 2 },
+  "--noise-seed": { fallback: undefined, minimum: Number.MIN_SAFE_INTEGER },
 } as const;
 
 type IntegerOption = keyof typeof INTEGER_OPTIONS;
@@ -48,6 +50,9 @@ export interface DiscoverArguments {
   caseCount: number;
   /** Live Gemini is opt-in. The default is the scripted dummy provider. */
   live: boolean;
+  worldId: string;
+  /** Private noise seed. Undefined keeps Glow World on its original tools. */
+  noiseSeed: number | undefined;
 }
 
 export interface DiscoveryProviderChoice {
@@ -75,6 +80,7 @@ export function resolveDiscoveryProvider(env: NodeJS.ProcessEnv, live: boolean):
 export function parseDiscoverArgs(argv: readonly string[]): DiscoverArguments {
   const values = new Map<IntegerOption, number>();
   let live = false;
+  let worldId: string | undefined;
   for (let index = 0; index < argv.length; index++) {
     const token = argv[index];
     if (token === "--live") {
@@ -82,6 +88,15 @@ export function parseDiscoverArgs(argv: readonly string[]): DiscoverArguments {
         throw new DiscoverArgumentsError();
       }
       live = true;
+      continue;
+    }
+    if (token === "--world") {
+      const raw = argv[index + 1];
+      if (worldId !== undefined || raw === undefined || !WORLD_IDS.includes(raw)) {
+        throw new DiscoverArgumentsError();
+      }
+      worldId = raw;
+      index++;
       continue;
     }
     if (token === undefined || !isIntegerOption(token)) {
@@ -112,6 +127,8 @@ export function parseDiscoverArgs(argv: readonly string[]): DiscoverArguments {
     outOfRangeSeed: values.get("--out-of-range-seed") ?? INTEGER_OPTIONS["--out-of-range-seed"].fallback,
     caseCount: values.get("--case-count") ?? INTEGER_OPTIONS["--case-count"].fallback,
     live,
+    worldId: worldId ?? WORLD_IDS[0]!,
+    noiseSeed: values.get("--noise-seed"),
   };
 }
 
@@ -124,6 +141,8 @@ async function main(): Promise<void> {
     const secrets = apiKey === "" ? [] : [apiKey];
     const result = await runDiscoverySession({
       provider: choice.provider,
+      worldId: args.worldId,
+      noiseSeed: args.noiseSeed,
       budget: args.budget,
       maxModelTurns: args.maxModelTurns,
       timeoutMs: args.timeoutMs,
@@ -165,13 +184,16 @@ async function main(): Promise<void> {
 
 function operatorReport(result: DiscoverySessionResult): DiscoverySessionResult {
   return {
+    worldId: result.worldId,
     status: result.status,
     modelTurns: result.modelTurns,
     experimentCount: result.experimentCount,
     remainingBudget: result.remainingBudget,
     submittedTheory: result.submittedTheory,
+    submittedNumericTheory: result.submittedNumericTheory,
     theoryId: result.theoryId,
     evaluation: result.evaluation,
+    worldEvaluation: result.worldEvaluation,
     evaluationOptions: result.evaluationOptions,
     providerDiagnostic: result.providerDiagnostic,
     transcript: result.transcript,

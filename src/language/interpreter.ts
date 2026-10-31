@@ -7,24 +7,35 @@
  * given.
  */
 import { languageFailure, type LanguageErrorCode, type LanguageFailure } from "./errors.js";
-import { VariableValuesSchema, type Expression, type VariableValues } from "./expression.js";
+import {
+  DEFAULT_VARIABLE_SET,
+  variableValuesSchemaFor,
+  type Expression,
+  type VariableSet,
+  type VariableValues,
+} from "./expression.js";
 import { validateExpression } from "./validate.js";
 
 export type EvaluationResult = { ok: true; value: number } | LanguageFailure;
 
 /**
  * Validates `expression` and `variables`, then computes the expression's value.
+ * `variableSet` names the allowed variables and defaults to `a`, `b`, `c`.
  * Never throws for bad input; failures are returned as fixed error codes.
  */
-export function evaluateExpression(expression: unknown, variables: unknown): EvaluationResult {
-  const validated = validateExpression(expression);
+export function evaluateExpression(
+  expression: unknown,
+  variables: unknown,
+  variableSet: VariableSet = DEFAULT_VARIABLE_SET,
+): EvaluationResult {
+  const validated = validateExpression(expression, variableSet);
   if (!validated.ok) {
     return validated;
   }
 
   let values: VariableValues;
   try {
-    const parsed = VariableValuesSchema.safeParse(variables);
+    const parsed = variableValuesSchemaFor(variableSet).safeParse(variables);
     if (!parsed.success) {
       return languageFailure("INVALID_VARIABLES");
     }
@@ -55,7 +66,8 @@ function evaluateNode(node: Expression, values: VariableValues): number {
     return node.const;
   }
   if ("var" in node) {
-    return values[node.var];
+    // Validation guarantees the name is in the set and the value is a finite number.
+    return values[node.var]!;
   }
   if ("op" in node) {
     const left = evaluateNode(node.left, values);

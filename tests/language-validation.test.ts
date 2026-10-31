@@ -364,6 +364,7 @@ describe("Language module isolation", () => {
       "errors.ts",
       "expression.ts",
       "interpreter.ts",
+      "numeric-theory.ts",
       "preflight.ts",
       "theory.ts",
       "validate.ts",

@@ -226,7 +226,7 @@ function rowsFromObservations(observations: readonly Observation[]): ObservedRow
       b: observation.inputs.b,
       c: observation.inputs.c,
     },
-    glows: observation.outcome.glows,
+    outcome: observation.outcome.glows,
   }));
 }
 
@@ -270,7 +270,9 @@ function formatAccuracy(value: number | null): string {
   return value.toFixed(4);
 }
 
-function formatTheory(theory: Theory | null): string {
+export function formatTheory(
+  theory: { measurement: unknown; operator: string; threshold: number } | null,
+): string {
   if (theory === null) {
     return "none";
   }
@@ -278,7 +280,7 @@ function formatTheory(theory: Theory | null): string {
   return `${formatExpression(theory.measurement)} ${symbol} ${theory.threshold}`;
 }
 
-function formatExpression(expression: unknown): string {
+export function formatExpression(expression: unknown): string {
   if (typeof expression !== "object" || expression === null) {
     return "?";
   }
@@ -298,7 +300,7 @@ function formatExpression(expression: unknown): string {
   return "?";
 }
 
-function formatTable(rows: string[][]): string[] {
+export function formatTable(rows: string[][]): string[] {
   const columnCount = Math.max(...rows.map((row) => row.length));
   const widths = Array.from({ length: columnCount }, (_, column) =>
     Math.max(...rows.map((row) => (row[column] ?? "").length)),

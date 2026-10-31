@@ -76,7 +76,7 @@ describe("[AT-3] Boundary at exactly 5", () => {
 describe("World module surface", () => {
   it("exports only public facts and the outcome function, not the rule configuration", () => {
     expect(Object.keys(glowWorld).sort()).toEqual(
-      ["ATTRIBUTE_MAX", "ATTRIBUTE_MIN", "GLOW_WORLD_ID", "computeGlowOutcome"].sort(),
+      ["ATTRIBUTE_MAX", "ATTRIBUTE_MIN", "GLOW_WORLD", "GLOW_WORLD_ID", "computeGlowOutcome"].sort(),
     );
   });
 

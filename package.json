@@ -10,7 +10,8 @@
     "build": "tsc -p tsconfig.build.json",
     "baselines": "npm run build && node dist/cli/baselines.js",
     "discover": "npm run build && node dist/cli/discover.js",
-    "compare": "npm run build && node dist/cli/compare.js"
+    "compare": "npm run build && node dist/cli/compare.js",
+    "transfer": "npm run build && node dist/cli/transfer.js"
   },
   "dependencies": {
     "@google/genai": "^2.29.1",

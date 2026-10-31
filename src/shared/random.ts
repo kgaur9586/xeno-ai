@@ -22,3 +22,14 @@ export function createSeededRandom(seed: number): RandomSource {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+/**
+ * One draw from a standard normal distribution (mean 0, standard deviation 1)
+ * using the Box-Muller transform. Consumes exactly two values from `random`.
+ */
+export function drawStandardNormal(random: RandomSource): number {
+  // 1 - u keeps the logarithm's argument in (0, 1].
+  const u1 = 1 - random();
+  const u2 = random();
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}

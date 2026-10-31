@@ -21,9 +21,23 @@ XENO validates and interprets itself. Generated code is never executed.
 | 3 | Restricted measurement language | Done |
 | 4 | Theory language, out-of-range scoring, theory registry | Done |
 | 5 | Single LLM agent | Done with dummy data; no live Gemini run scored yet |
-| 6 to 11 | Richer worlds, transfer, API, dashboard, MongoDB, multiple agents | Not started |
+| 6 | Richer worlds: noise, numeric outcomes, more distractors, two new worlds | Done; the agent and baselines run on every world |
+| 7 | Transfer to altered worlds | Done, on hand-built source theories |
+| 8 to 11 | API, dashboard, MongoDB, multiple agents | Not started |
 
 The full plan is in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md).
+
+## Worlds
+
+| World | Attributes | Outcome | Observations |
+| ----- | ---------- | ------- | ------------ |
+| `glow-world` | `a`, `b`, `c` | `glows` (true/false) | exact |
+| `ring-world` | `p`, `q`, `r`, `s` | `lit` (true/false) | noisy |
+| `drift-world` | `u`, `v`, `w`, `x`, `y` | `level` (number) | noisy |
+
+Each world hides its rule and includes attributes that have no effect. On
+noisy worlds the evaluator's pass thresholds allow for the noise, so a correct
+theory can pass without scoring 100%.
 
 ## Requirements
 
@@ -61,9 +75,11 @@ set.
 | `npm run typecheck` | Type-checks `src` and `tests`. |
 | `npm run build` | Compiles `src` to `dist`. |
 | `npm run baselines` | Prints exploration metrics for the random and grid explorers. These are not discovery scores. |
-| `npm run compare` | Scores the dummy agent and both baselines at the same budget (27) and seed (42). |
+| `npm run compare` | Scores the dummy agent and both baselines on Glow World at the same budget (27) and seed (42). |
+| `npm run compare -- --world ring-world` | The same comparison on another world, scored by the noise-aware evaluator. Add `--noise-seed <n>` to change the private noise seed. |
 | `npm run discover` | Runs one discovery session with the dummy provider. |
 | `npm run discover -- --live` | Runs one session against Gemini. Requires both `.env` values. |
+| `npm run transfer` | Runs the hand-built transfer cases: does a theory still pass after the world is altered, and how many experiments does adapting it take? |
 
 `discover` accepts these options:
 
@@ -76,6 +92,8 @@ set.
 | `--in-range-seed` | 1 | Seed for the in-range evaluation cases |
 | `--out-of-range-seed` | 2 | Seed for the out-of-range evaluation cases |
 | `--case-count` | 200 | Evaluation cases per set (must be even) |
+| `--world` | `glow-world` | World to investigate: `glow-world`, `ring-world`, or `drift-world` |
+| `--noise-seed` | none | Private observation noise seed (the world tools default to 1) |
 | `--live` | off | Use Gemini instead of the dummy provider |
 
 Example:
@@ -84,15 +102,21 @@ Example:
 npm run discover -- --budget 10 --max-turns 8
 ```
 
-`discover` and `compare` save a JSON copy of each run, including the full
-transcript, under `runs/`. That folder is ignored by Git. A run is not saved if
+`discover`, `compare`, and `transfer` save a JSON copy of each run (for
+`discover`, including the full transcript) under `runs/`. That folder is ignored by Git. A run is not saved if
 the API key would appear in the file.
 
 ## Reading the results
 
 - **Dummy results are not model results.** Every dummy run is labeled as such
-  in its output. The dummy explores the same min/mid/max grid as the
-  systematic baseline and picks its theory from a small fixed catalog.
+  in its output. On Glow World the dummy explores the same min/mid/max grid
+  as the systematic baseline. On larger worlds it uses a fixed-seed random
+  design. It picks its theory from a small fixed catalog (least squares for
+  numeric outcomes).
+- **Transfer cases use hand-written theories.** `npm run transfer` starts
+  from each world's true rule, not from an agent's discovery. Adapting may
+  rename variables and retune constants. It cannot change the theory's form,
+  so a changed rule is expected not to adapt.
 - **Perfect scores on Glow World are expected and not meaningful.** The
   catalog uses each public range's midpoint, which happens to match Glow
   World's private threshold. See
@@ -105,12 +129,13 @@ the API key would appear in the file.
 
 ```
 src/
-  worlds/      world engine; the only place a hidden rule lives
+  worlds/      world engines, registry, and variant worlds; the only place hidden rules live
   tools/       agent-facing experiment tools and strict schemas
   language/    restricted measurement and theory language
   evaluator/   held-out case generation, theory scoring, registry
   agents/      baselines, discovery agent loop, session, comparison
   llm/         provider interface, Gemini adapter, dummy provider
+  transfer/    theory refit, transfer metrics, hand-built transfer cases
   shared/      seeded random number generator
   cli/         entry points for the npm commands
 tests/         Vitest suite
@@ -121,8 +146,9 @@ docs/          project plan and architecture
 
 - [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md): phases, deliverables, and
   exit criteria.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): components, information
-  hiding, the Glow World design, benchmark limits, and the Phase 5 agent.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): components,   information
+  hiding, the Glow World design, benchmark limits, the Phase 5 agent, the
+  Phase 6 worlds, and Phase 7 transfer.
 
 These documents describe the hidden rule. They are never placed in an agent's
 context.
