@@ -497,7 +497,16 @@ world adds `src/tools/public-types.ts`, `src/agents/discovery-world.ts`, and
 `scenarios.ts`, and `src/cli/transfer.ts` (section 10). Phase 8 adds
 `src/api/schemas.ts`, `session-manager.ts`, `app.ts`, and `src/cli/serve.ts`
 (section 11). Phase 9 adds the React dashboard in `web/`, built into
-`dist-web/`, plus `vitest.config.ts` (section 12).
+`dist-web/`, plus `vitest.config.ts` (section 12). Phase 10 adds
+`src/storage/session-store.ts` and `mongo-session-store.ts`, plus
+`tests/storage-contract.ts`, `storage-memory.test.ts`, and
+`storage-mongo.test.ts` (section 13).
+
+Phase 10 adds the `mongodb` package so the server can keep sessions in
+MongoDB. Tests add `mongodb-memory-server` (development only), which
+downloads and runs a real `mongod` so the storage suite does not need a
+database installed on the machine. Set `XENO_TEST_MONGO_URI` to point that
+suite at an existing server instead.
 
 ---
 
@@ -847,10 +856,11 @@ turn, including provider retries. `runDiscoveryAgent` loops over it, so the
 CLI and every earlier test behave exactly as before. A second `step()` while
 one is running throws.
 
-`src/api/session-manager.ts` keeps sessions in memory (100 at most by
-default; Phase 10 replaces this with MongoDB). Each session owns its
-experiment tools, its run, and its private settings. Glow World without a
-noise seed uses the original tools, as in the CLI.
+`src/api/session-manager.ts` keeps up to 100 sessions in a `SessionStore`.
+The default store is in memory. When `XENO_MONGODB_URI` is set, `npm run
+serve` uses MongoDB instead (section 13), and sessions survive a restart.
+A running session also keeps its live agent run in this process. Glow World
+without a noise seed uses the original tools, as in the CLI.
 
 ### 11.2 Routes
 
@@ -899,7 +909,8 @@ or DELETE are rejected. POST bodies must be `application/json` and at most
 | `SESSION_BUSY`, `SESSION_FINISHED`, `NO_THEORY`, `SESSION_LIMIT` | 409 |
 | `BODY_TOO_LARGE` | 413 |
 | `UNSUPPORTED_MEDIA_TYPE` | 415 |
-| `INTERNAL_ERROR` | 500 |
+| `INTERNAL_ERROR`, `SESSION_CORRUPT` | 500 |
+| `STORAGE_UNAVAILABLE` | 503 |
 
 Every response sets `cache-control: no-store` and
 `x-content-type-options: nosniff`.
@@ -910,8 +921,10 @@ The dummy provider is always available. Gemini is offered only when the
 server starts with `--live` and both Gemini values are set; otherwise
 `provider: "gemini"` gets `PROVIDER_UNAVAILABLE`. The Gemini key and the
 operator token are passed to the transcript scrubber and are never printed
-or returned. `.env` may hold `XENO_OPERATOR_TOKEN`; the loader still ignores
-every other variable.
+or returned. `.env` may also hold `XENO_OPERATOR_TOKEN`,
+`XENO_MONGODB_URI`, and `XENO_MONGODB_DB`. The loader still ignores every
+other variable. The MongoDB URI is treated as a secret: it is never printed,
+and it is scrubbed from transcripts.
 
 ### 11.5 Leak tests (`tests/api.test.ts`)
 
@@ -925,10 +938,11 @@ evaluations.
 
 ### 11.6 Limits
 
-Sessions live in memory and disappear when the server stops. A step request
-stays open until its turns finish, which can take minutes with a live model.
-The server binds to 127.0.0.1 and has no user accounts; the operator token is
-the only access control.
+Without `XENO_MONGODB_URI`, sessions live in memory and disappear when the
+server stops. With it, they are reloaded from MongoDB (section 13). A step
+request stays open until its turns finish, which can take minutes with a
+live model. The server binds to 127.0.0.1 and has no user accounts; the
+operator token is the only access control.
 
 ---
 
@@ -956,12 +970,14 @@ cached as immutable, and the page itself is not cached.
 
 | View | Source | Shows |
 | ---- | ------ | ----- |
-| Session list and create form | `SessionList`, `CreateSessionForm` | World, provider, status, turns, and experiments used. New sessions take a world, budget, turn limit, and an optional private noise seed. |
-| Session detail | `SessionDetail` | Status, counters, "Step one turn", and "Run to end" (32 turns per request). |
-| Experiment timeline | `ExperimentTimeline` | An SVG mark per experiment in run order: two lanes for a boolean outcome, a line for a numeric one. Below it is a table of every input and outcome. |
-| Measurements | `MeasurementList` | Each `evaluate_measurement` call from the transcript, whether it was valid, and the range of its values |
-| Theory | `SessionDetail`, `TheoryTable` | The submitted theory in readable form, every submission attempt with its result, and a table of all sessions' theories |
-| Score charts | `ScoreChart` | Bars for in-range and out-of-range accuracy (or within-tolerance rate on numeric worlds), each with its pass threshold, plus RMSE for numeric worlds |
+| Session rail and create form | `SessionList`, `CreateSessionForm` | One card per session: world, status, provider, and experiments used. New sessions take a world, budget, turn limit, and an optional private noise seed. |
+| Session detail | `SessionDetail` | Status, gauges for turns and experiments, and actions: Step (`S`), Run to end (`R`, one turn at a time so the view updates live), Pause (`P`). `N` focuses the world picker. |
+| Experiment space | `ExperimentSpace` | A scatter plot of probes on two chosen inputs, coloured by the observed outcome. |
+| Experiment timeline | `ExperimentTimeline` | An SVG mark per experiment in run order: two lanes for a boolean outcome, a line for a numeric one. A disclosure lists every input and outcome. |
+| Agent activity | `AgentFeed` | The public transcript as readable steps. Model text is shown as plain text. |
+| Measurements | `MeasurementList` | Each `evaluate_measurement` call, whether it was valid, the range of its values, and a sparkline. |
+| Theory | `SessionDetail`, `TheoryTable` | The submitted theory in readable form, every submission attempt with its result, and a table of all sessions' theories. |
+| Score charts | `ScoreChart` | Bars for in-range and out-of-range accuracy (or within-tolerance rate on numeric worlds), each with its pass threshold, plus RMSE for numeric worlds. |
 
 Charts are plain SVG, so there is no chart library.
 
@@ -983,9 +999,10 @@ code.
 ### 12.4 Tests
 
 - `web/tests/components.test.tsx` (jsdom) renders each key view with fixed
-  data. It covers selection and deletion, form validation, timeline marks for
-  both outcome kinds, theory rows with and without scores, chart bars and
-  thresholds, transcript parsing, and empty states.
+  data. It covers selection and deletion, form validation, the experiment
+  space, timeline marks for both outcome kinds, the activity feed, theory
+  rows with and without scores, chart bars and thresholds, transcript
+  parsing, and empty states.
 - `web/tests/app.test.tsx` renders the whole app against a real API server
   on a random port. It creates and runs sessions, checks that no scores or
   noise seed appear without the token, then enters the token, evaluates, and
@@ -994,3 +1011,83 @@ code.
 - `tests/api-dashboard.test.ts` covers dashboard hosting: the redirect, the
   security policy, asset types, path traversal attempts, allowed methods,
   and the server without a dashboard.
+
+---
+
+## 13. Phase 10 MongoDB persistence
+
+Sessions, observations, theories, transcripts, and evaluator results are
+stored through `SessionStore` (`src/storage/session-store.ts`). The HTTP
+layer decides which fields a response may contain. The store is
+operator-side and is never given to an agent.
+
+### 13.1 The storage interface
+
+`insert`, `get`, `list` (oldest first, ties broken by session id), `count`,
+`saveProgress`, `appendEvaluation`, `remove`, and `close`. Reads and writes
+return copies, so a caller cannot change a stored record by mutating what it
+was given. `insert` throws `DuplicateSessionError` when the id is taken.
+`saveProgress` replaces only the fields that change as the agent works
+(status, turns, transcript, provider conversation, observations, submitted
+theory, provider diagnostic, and `updatedAt`). Settings, the world, and
+stored evaluations stay put. A missing session makes every write return
+false.
+
+`createMemorySessionStore` keeps records in this process. It is the default
+when `XENO_MONGODB_URI` is unset.
+
+### 13.2 MongoDB backend
+
+`createMongoSessionStore({ uri, database })` uses the official `mongodb`
+driver. The database defaults to `xeno`, and the collection is `sessions`,
+with the session id as `_id` and an index on `createdAt` then `_id`.
+
+Settings, counters, the observation log, the provider diagnostic, and
+evaluator results are ordinary fields. Content the model wrote (the
+transcript, the provider conversation, and the submitted theory) can contain
+any key, including keys MongoDB would treat as operators, so those three
+values are stored as JSON text and parsed back exactly.
+
+`npm run serve` connects when `XENO_MONGODB_URI` is set and uses
+`XENO_MONGODB_DB` when that is set too. A failed connection prints
+`Could not connect to MongoDB (check XENO_MONGODB_URI).` and does not print
+the URI. Later driver failures become `503 STORAGE_UNAVAILABLE`, again
+without connection details.
+
+### 13.3 Continuing a session after a restart
+
+Progress is saved when a session is created, after every model turn, when it
+is evaluated, and it is removed on delete. The live agent run stays in this
+process. After a restart the next step rebuilds it:
+
+1. Fresh tools are opened with the stored budget and the private noise seed.
+2. Every stored experiment is replayed. Rejected requests draw no noise, so
+   the noise stream lines up. If any replayed outcome differs from the stored
+   one, the step fails with `SESSION_CORRUPT` and nothing is advanced.
+3. `createDiscoveryRun` resumes from the stored transcript, provider
+   messages, and turn count, which the run now exposes for this purpose.
+
+A session another process already finished answers `SESSION_FINISHED`.
+
+### 13.4 Tests
+
+`tests/storage-contract.ts` is the suite every backend must pass: round
+trips, duplicate ids, sort order, copy isolation, hostile keys in
+model-written content, progress that must not overwrite fixed fields,
+ordered and concurrent evaluations, deletion, continuing a session from a
+second session manager, and refusal to resume a tampered observation log.
+
+`tests/storage-memory.test.ts` runs that suite against the memory store.
+`tests/storage-mongo.test.ts` runs it against a real MongoDB server. By
+default `mongodb-memory-server` starts one in-process; `XENO_TEST_MONGO_URI`
+uses a server you already have. Each test gets its own database, which is
+dropped afterwards. A separate test checks the document layout (model
+content stored as JSON text, an index on `createdAt`) and that a record
+survives closing the client and opening it again.
+
+### 13.5 Limits
+
+The busy flag and the live run are per process. Two servers pointed at the
+same database can both try to step one session. The 100-session cap still
+applies, counted in the store. Replaying experiments requires the same world
+code and noise seed that produced the stored outcomes.

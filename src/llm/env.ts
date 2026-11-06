@@ -1,6 +1,6 @@
 /**
- * Loads only XENO's own settings from a local .env file: the Gemini settings
- * and the API's operator token.
+ * Loads only XENO's own settings from a local .env file: the Gemini settings,
+ * the API's operator token, and the optional MongoDB settings.
  *
  * Other variables in the file are ignored, existing environment values are
  * kept, and the file contents are never logged.

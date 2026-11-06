@@ -23,9 +23,10 @@ XENO validates and interprets itself. Generated code is never executed.
 | 5 | Single LLM agent | Done with dummy data; no live Gemini run scored yet |
 | 6 | Richer worlds: noise, numeric outcomes, more distractors, two new worlds | Done; the agent and baselines run on every world |
 | 7 | Transfer to altered worlds | Done, on hand-built source theories |
-| 8 | Backend HTTP API | Done; sessions are kept in memory |
+| 8 | Backend HTTP API | Done |
 | 9 | React dashboard | Done |
-| 10 to 11 | MongoDB, multiple agents | Not started |
+| 10 | MongoDB persistence | Done; in memory when no URI is set |
+| 11 | Multiple specialized agents | Not started (optional) |
 
 The full plan is in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md).
 
@@ -82,7 +83,7 @@ set.
 | `npm run discover` | Runs one discovery session with the dummy provider. |
 | `npm run discover -- --live` | Runs one session against Gemini. Requires both `.env` values. |
 | `npm run transfer` | Runs the hand-built transfer cases: does a theory still pass after the world is altered, and how many experiments does adapting it take? |
-| `npm run serve` | Builds everything and starts the HTTP API on `http://127.0.0.1:3000`, with the dashboard at `/dashboard/`. Add `-- --port <n>` to change the port, or `-- --live` to offer Gemini. |
+| `npm run serve` | Builds everything and starts the HTTP API on `http://127.0.0.1:3000`, with the dashboard at `/dashboard/`. Add `-- --port <n>` to change the port, or `-- --live` to offer Gemini. Set `XENO_MONGODB_URI` to keep sessions in MongoDB. |
 | `npm run dashboard:dev` | Dashboard dev server with hot reload. It proxies API calls to a server running on port 3000. |
 
 `discover` accepts these options:
@@ -136,8 +137,13 @@ curl -X POST http://127.0.0.1:3000/evaluator/sessions/<id>/evaluations \
 ```
 
 Every route, request field, and error code is listed in
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), section 11. Sessions are kept
-in memory and are lost when the server stops.
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), section 11.
+
+Sessions stay in memory unless `XENO_MONGODB_URI` is set (in the environment
+or `.env`). With it, `npm run serve` stores them in MongoDB, in the database
+named by `XENO_MONGODB_DB` (default `xeno`), and a restarted server continues
+them. The URI may contain a password and is never printed. Without it,
+sessions are lost when the server stops.
 
 ## Dashboard
 
@@ -145,14 +151,16 @@ Run `npm run serve` and open
 [http://127.0.0.1:3000/dashboard/](http://127.0.0.1:3000/dashboard/). From
 there you can:
 
-- create a session for any world and run it one turn at a time or to the end
-- follow each experiment on the timeline
-- see the measurements the agent defined and every theory it submitted
+- create a session for any world, then step it, run it live, or pause it
+  (`N`, `S`, `R`, and `P`)
+- see where the agent probed, each experiment on the timeline, and what it
+  did in the activity feed
+- read the measurements it defined and every theory it submitted
 
 Held-out scores stay hidden until you enter the operator token
-(`XENO_OPERATOR_TOKEN`) in the top bar. The dashboard then adds an
-"Evaluate theory" button, score columns in the theory table, and score charts
-with pass thresholds. The token is kept in memory only.
+(`XENO_OPERATOR_TOKEN`) in the top bar. The dashboard then adds an Evaluate
+action (`E`), score columns in the theory table, and score charts with pass
+thresholds. The token is kept in memory only.
 
 ## Reading the results
 
@@ -184,7 +192,8 @@ src/
   agents/      baselines, discovery agent loop, session, comparison
   llm/         provider interface, Gemini adapter, dummy provider
   transfer/    theory refit, transfer metrics, hand-built transfer cases
-  api/         HTTP API: request schemas, in-memory sessions, routes
+  api/         HTTP API: request schemas, sessions, routes
+  storage/     session store: in-memory and MongoDB
   shared/      seeded random number generator
   cli/         entry points for the npm commands
 web/           React dashboard (Vite): components, API client, component tests
@@ -198,8 +207,8 @@ docs/          project plan and architecture
   exit criteria.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): components,   information
   hiding, the Glow World design, benchmark limits, the Phase 5 agent, the
-  Phase 6 worlds, Phase 7 transfer, the Phase 8 API, and the Phase 9
-  dashboard.
+  Phase 6 worlds, Phase 7 transfer, the Phase 8 API, the Phase 9 dashboard,
+  and Phase 10 persistence.
 
 These documents describe the hidden rule. They are never placed in an agent's
 context.

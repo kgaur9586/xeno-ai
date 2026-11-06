@@ -269,8 +269,8 @@ and changed rules do not adapt within 200 experiments. See
 on 127.0.0.1. Sessions are created, stepped one model turn at a time, and
 inspected (world, observations, transcript). Scores come only from
 `/evaluator/` routes, which need `XENO_OPERATOR_TOKEN` and are disabled
-without it. Sessions are kept in memory until Phase 10. See
-`ARCHITECTURE.md` section 11.
+without it. With `XENO_MONGODB_URI` set, sessions are stored in MongoDB
+(Phase 10); otherwise they stay in memory. See `ARCHITECTURE.md` section 11.
 
 ---
 
@@ -303,6 +303,15 @@ render every key view, and run the full app against a real API server. See
 
 **Exit criteria**
 - The same storage test suite passes against in-memory and MongoDB backends.
+
+**Status:** Done. `SessionStore` is the only way the API keeps sessions.
+`createMemorySessionStore` is the default, and `createMongoSessionStore`
+writes the same records to MongoDB when `npm run serve` is given
+`XENO_MONGODB_URI`. A restarted server can continue a running session: it
+replays the stored experiments and resumes the saved conversation. One test
+suite (`tests/storage-contract.ts`) passes against both backends. The MongoDB
+run uses a real server, started in-process for tests. See `ARCHITECTURE.md`
+section 13.
 
 ---
 
